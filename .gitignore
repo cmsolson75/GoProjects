@@ -1,0 +1,30 @@
+# Binaries for programs and packages
+*.exe
+*.ext~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Ignore vendor/
+vendor/
+
+# Build and Test Artifacts
+*.coverprofile
+*.cover.out
+*.test
+*.tmp
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+
+# OS Sys files
+# Mac
+.DS_Store
+# Windows
+Thumbs.db
