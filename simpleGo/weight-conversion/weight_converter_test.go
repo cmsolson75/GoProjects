@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"math"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -24,102 +27,97 @@ func checkWeightOutput(t *testing.T, got, want float64) {
 	}
 }
 
-func TestLbsToKg(t *testing.T) {
-	got := LbsToKg(150.0)
+func TestWeightFactory(t *testing.T) {
+	tests := []struct {
+		unit   string
+		weight float64
+		want   Weight
+		err    bool
+	}{
+		{"pound", 150.0, Weight{"pound", 150.0, map[string]float64{"ounce": 16.0, "gram": 453.59237, "kilogram": 0.453592, "pound": 1.0}}, false},
+		{"ounce", 100.0, Weight{"ounce", 100.0, map[string]float64{"ounce": 1.0, "gram": 28.34952, "kilogram": 0.02834952, "pound": 0.0625}}, false},
+		{"invalid", 100.0, Weight{}, true},
+	}
+
+	for _, tt := range tests {
+		got, err := WeightFactory(tt.unit, tt.weight)
+		if (err != nil) != tt.err {
+			t.Errorf("WeightFactory() error = %v, wantErr %v", err, tt.err)
+		}
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("WeightFactory() = %v, want %v", got, tt.want)
+		}
+	}
+}
+
+func TestConvertWeight(t *testing.T) {
+	w, err := WeightFactory("pound", 150.0)
+	if err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+	got, err := w.ConvertWeight("kilogram")
+	if err != nil {
+		t.Fatal("unexpected error:", err)
+	}
 	want := 68.0388
 	checkWeightOutput(t, got, want)
 }
 
-func TestLbsToG(t *testing.T) {
-	got := LbsToG(150.0)
-	want := 68038.8555
-	checkWeightOutput(t, got, want)
+func TestInvalidConversion(t *testing.T) {
+	w, err := WeightFactory("pound", 150.0)
+	if err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+	_, err = w.ConvertWeight("stone")
+	if err == nil {
+		t.Errorf("expected error, got none")
+	}
 }
 
-func TestLbsToOz(t *testing.T) {
-	got := LbsToOz(150.0)
-	want := 2400.0
-	checkWeightOutput(t, got, want)
+func TestGetValidUnit(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+		err      bool
+	}{
+		{"lbs", "pound", false},
+		{"ounces", "ounce", false},
+		{"grams", "gram", false},
+		{"stone", "", true},
+	}
+
+	for _, tt := range tests {
+		got, err := GetValidUnit(tt.input)
+		if (err != nil) != tt.err {
+			t.Errorf("GetValidUnit(%v) error = %v, wantErr %v", tt.input, err, tt.err)
+		}
+		if got != tt.expected {
+			t.Errorf("GetValidUnit(%v) = %v, want %v", tt.input, got, tt.expected)
+		}
+	}
 }
 
-func TestLbsConverter(t *testing.T) {
-	got := LbsConverter("oz", 10)
-	want := 160.0
-	checkWeightOutput(t, got, want)
+func TestGetWeightInput(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("150 lbs\n"))
+	unit, weight, err := GetWeightInput(reader)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if unit != "pound" {
+		t.Errorf("got %v, want %v", unit, "pound")
+	}
+	if weight != 150.0 {
+		t.Errorf("got %v, want %v", weight, 150.0)
+	}
 }
 
-func TestOzToLbs(t *testing.T) {
-	got := OzToLbs(15.0)
-	want := 0.9375
-	checkWeightOutput(t, got, want)
-}
-
-func TestOzToG(t *testing.T) {
-	got := OzToG(15.0)
-	want := 425.2428
-	checkWeightOutput(t, got, want)
-}
-
-func TestOzToKg(t *testing.T) {
-	got := OzToKg(15.0)
-	want := 0.4252428
-	checkWeightOutput(t, got, want)
-}
-
-func TestOzConverter(t *testing.T) {
-	got := OzConverter("lb", 15.0)
-	want := 0.9375
-	checkWeightOutput(t, got, want)
-}
-
-// ---- G converter
-func TestGToKg(t *testing.T) {
-	got := GToKg(15.0)
-	want := 0.015
-	checkWeightOutput(t, got, want)
-
-}
-
-func TestGToLbs(t *testing.T) {
-	got := GToLbs(15.0)
-	want := 0.0330693393277
-	checkWeightOutput(t, got, want)
-}
-
-func TestGToOz(t *testing.T) {
-	got := GToOz(15.0)
-	exp := 0.52910942925
-	checkWeightOutput(t, got, exp)
-}
-
-func TestGConverter(t *testing.T) {
-	got := GConverter("oz", 15)
-	want := 0.52910942925
-	checkWeightOutput(t, got, want)
-}
-
-// // ---- Kg converter
-
-func TestKgToG(t *testing.T) {
-	got := KgToG(15.0)
-	want := 15000.0
-	checkWeightOutput(t, got, want)
-}
-
-func TestKgToOz(t *testing.T) {
-	got := KgToOz(15.0)
-	want := 529.10942925
-	checkWeightOutput(t, got, want)
-}
-
-func TestKgToLbs(t *testing.T) {
-	got := KgToLbs(15.0)
-	want := 33.0693393278
-	checkWeightOutput(t, got, want)
-}
-
-func TestKgConverter(t *testing.T) {
-	got := KgConverter("oz", 15)
-	want := 529.10942925
-	checkWeightOutput(t, got, want)
+func TestGetUnitConversionInput(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("kg\n"))
+	unit, err := GetUnitConversionInput(reader)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if unit != "kilogram" {
+		t.Errorf("got %v, want %v", unit, "kilogram")
+	}
 }
