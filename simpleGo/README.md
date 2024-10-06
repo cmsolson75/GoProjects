@@ -7,5 +7,5 @@ I just want to do a few simple projects to get a handle on the Syntax.
 - [Bro Code Python Projects](https://youtu.be/4wGuB3oAKc4?si=dqKh5rBYM6fWcJrK)
 
 ## Projects Key
-[Calculator](./calculator/)
-[Weight Conversion](./weight-conversion/)
+- [Calculator](./calculator/)
+- [Weight Conversion](./weight-conversion/)
