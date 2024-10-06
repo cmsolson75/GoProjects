@@ -144,6 +144,6 @@ func main() {
 		return
 	}
 
-	fmt.Println("Converted Weight: ", convertedWeight)
+	fmt.Printf("Converted Weight: %f %ss\n", convertedWeight, unit)
 
 }
