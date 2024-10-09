@@ -9,3 +9,4 @@ I just want to do a few simple projects to get a handle on the Syntax.
 ## Projects Key
 - [Calculator](./calculator/)
 - [Weight Conversion](./weight-conversion/)
+- [Temperature Conversion](./temperature-converter/)
