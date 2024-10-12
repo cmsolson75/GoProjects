@@ -13,10 +13,10 @@ type DB interface {
 	Write() error
 	Read() error
 	Add(userRecord []string) error
-	Delete(id int)
-	ViewAll()
-	ViewEmail()
-	Search(email string)
+	Delete(email string)
+	ViewAll() error
+	ViewEmail(email string)
+	Search(email string) ([]string, bool, error)
 }
 
 type CSV struct {
