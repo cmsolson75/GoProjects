@@ -18,14 +18,15 @@ var viewCmd = &cobra.Command{
 	for an email in the csv.
 	`,
 	Run: func(cmd *cobra.Command, args []string) {
-		if viewAll {
-			err := db.UserDB.ViewAll()
+		if len(viewEmail) != 0 {
+			err := db.UserDB.ViewEmail(viewEmail)
 			if err != nil {
 				fmt.Println("Error:", err)
 				return
 			}
-		} else if len(viewEmail) != 0 {
-			err := db.UserDB.ViewEmail(viewEmail)
+
+		} else if viewAll {
+			err := db.UserDB.ViewAll()
 			if err != nil {
 				fmt.Println("Error:", err)
 				return
@@ -41,7 +42,7 @@ var viewAll bool
 var viewEmail string
 
 func init() {
-	viewCmd.Flags().BoolVarP(&viewAll, "all", "a", false, "Set to true if you want to view full db")
+	viewCmd.Flags().BoolVarP(&viewAll, "all", "a", true, "Set to true if you want to view full db")
 	viewCmd.Flags().StringVarP(&viewEmail, "email", "e", "", "Email to search in the db")
 
 	rootCmd.AddCommand(viewCmd)

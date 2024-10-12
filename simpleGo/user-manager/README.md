@@ -42,14 +42,14 @@ The writer looks like it is doing the following
     - encorages to use internal error w.Error()
 
 
-MOCH Inputs
+MOCK Inputs
 ```
 in := `first_name,last_name,username
 "Rob","Pike",rob
 Ken,Thompson,ken
 "Robert","Griesemer","gri"
 `
-	// this is moching the reader
+	// this is mocking the reader
 	r := csv.NewReader(strings.NewReader(in))
 	records, err := r.ReadAll()
 ```

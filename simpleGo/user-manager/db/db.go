@@ -12,7 +12,7 @@ import (
 type DB interface {
 	Write() error
 	Read() error
-	Add(userData []string) error
+	Add(userRecord []string) error
 	Delete(id int)
 	ViewAll()
 	ViewEmail()
@@ -20,14 +20,15 @@ type DB interface {
 }
 
 type CSV struct {
-	File string
-	Data [][]string
+	file     string
+	data     [][]string
+	emailMap map[string][]string
 }
 
 func (d *CSV) ViewAll() error {
 	w := tabwriter.NewWriter(os.Stdout, 5, 0, 3, ' ', 0)
 
-	for _, r := range d.Data {
+	for _, r := range d.data {
 		fmt.Fprintln(w, r[0], "\t", r[1], "\t", r[2])
 	}
 
@@ -45,7 +46,7 @@ func (d *CSV) ViewEmail(email string) error {
 	if !present {
 		return errors.New("email not in db")
 	}
-	header := d.Data[0]
+	header := d.data[0]
 	w := tabwriter.NewWriter(os.Stdout, 5, 0, 3, ' ', 0)
 	fmt.Fprintln(w, header[0], "\t", header[1], "\t", header[2])
 
@@ -56,58 +57,71 @@ func (d *CSV) ViewEmail(email string) error {
 }
 
 func (d *CSV) Search(email string) ([]string, bool, error) {
-	// I want to setup a hash map in the CSV struct to make
-	// Lookup faster
-	// I need to do some kind of map or something
-	// Its okay we are in a compiled language but still.
-	for _, record := range d.Data {
-		userName := record[1]
-		userDomain := record[2]
-		idxEmail := fmt.Sprintf("%s@%s", userName, userDomain)
-		if idxEmail == email {
-			return record, true, nil
-		}
+	if record, exists := d.emailMap[email]; exists {
+		return record, true, nil
 	}
 	return []string{}, false, nil
 }
 
+func sliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (d *CSV) Delete(email string) error {
-	// fail fast
-	_, present, _ := d.Search(email)
-	if !present {
+	// Check if email exists in the map
+	record, exists := d.emailMap[email]
+	if !exists {
 		return errors.New("email not in db")
 	}
 
-	var data [][]string
-	data = append(data, d.Data[0])
-	for _, record := range d.Data[1:] {
-		userName := record[1]
-		userDomain := record[2]
-		userEmail := fmt.Sprintf("%s@%s", userName, userDomain)
-		if userEmail == email {
-			continue
+	// find index of record
+	var index int = -1
+	for i, rec := range d.data {
+		if sliceEqual(rec, record) {
+			index = i
+			break
 		}
-		data = append(data, record)
 	}
 
-	d.Data = data
+	// If the record was found remove in place
+	if index != -1 {
+		d.data = append(d.data[:index], d.data[index+1:]...) // remove
+	}
 
-	d.Write()
+	// Remove from emailMap
+	delete(d.emailMap, email)
 
-	return nil
+	return d.Write()
 }
 
 func (d *CSV) Read() error {
-	f, err := os.Open(d.File)
+	f, err := os.Open(d.file)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	reader := csv.NewReader(f)
-	d.Data, err = reader.ReadAll()
+	d.data, err = reader.ReadAll()
 	if err != nil {
 		return err
 	}
+
+	d.emailMap = make(map[string][]string)
+	for _, record := range d.data[1:] {
+		if len(record) >= 3 {
+			email := fmt.Sprintf("%s@%s", record[1], record[2])
+			d.emailMap[email] = record
+		}
+	}
+
 	return nil
 }
 
@@ -124,34 +138,37 @@ func (d *CSV) Add(userRecord []string) error {
 	}
 
 	// remove headers for processing
-	record := d.Data[1:]
+	record := d.data[1:]
 	n := len(record)
-	if n == 0 {
-		d.Data = append(d.Data, []string{"0", userName, userDomain})
-		return nil
+	newID := "0"
+	if n > 0 {
+		i, err := strconv.Atoi(record[n-1][0])
+		if err != nil {
+			return err
+		}
+		newID = strconv.Itoa(i + 1)
 	}
-	i, err := strconv.Atoi(record[n-1][0])
-	if err != nil {
-		return err
-	}
-	d.Data = append(d.Data, []string{strconv.Itoa(i + 1), userName, userDomain})
+	newRecord := []string{newID, userName, userDomain}
+	d.data = append(d.data, newRecord)
+
+	d.emailMap[userEmail] = newRecord
 	return nil
 
 }
 
 func (d *CSV) Write() error {
-	f, err := os.Create(d.File)
+	f, err := os.Create(d.file)
 	if err != nil {
 		return err
 	}
 
 	w := csv.NewWriter(f)
-	w.WriteAll(d.Data)
+	w.WriteAll(d.data)
 	return nil
 }
 
 func CSVInit(filename string) (CSV, error) {
-	db := CSV{File: filename}
+	db := CSV{file: filename}
 	err := db.Read()
 	if err != nil {
 		return CSV{}, err
