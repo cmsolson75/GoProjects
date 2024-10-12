@@ -10,3 +10,4 @@ I just want to do a few simple projects to get a handle on the Syntax.
 - [Calculator](./calculator/)
 - [Weight Conversion](./weight-conversion/)
 - [Temperature Conversion](./temperature-converter/)
+- [User Manager](./user-manager/)
