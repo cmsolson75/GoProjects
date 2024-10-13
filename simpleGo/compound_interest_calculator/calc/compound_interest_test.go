@@ -1,4 +1,4 @@
-package main
+package calc
 
 import (
 	"testing"
@@ -9,12 +9,14 @@ func TestCompoundInterestCalculation(t *testing.T) {
 		p := 1000.0
 		r := 10.0
 		time := 10.0
-		got, _ := CompoundInterestCalculation(p, r, time)
+		got, err := CompoundInterestCalculation(p, r, time)
+		if err != nil {
+			t.Error("error detected when not expected")
+		}
 		want := 2593.74 // need to round output to 2 decimals
 		assertFloat(t, got, want)
 	})
 
-	// handle before: but have the func handle if not handled before
 	t.Run("negative value", func(t *testing.T) {
 		p := 100.0
 		r := -10.0
