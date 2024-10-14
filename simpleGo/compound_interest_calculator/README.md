@@ -372,3 +372,8 @@ Okay so I have the app working; but I need some kind of output box.
 
 
 I need to make a box that shows a text view on the inside. So I can put a boarder on it.
+
+
+
+Good Example
+[link](https://github.com/dhulihan/grump/blob/main/ui/tracks.go)

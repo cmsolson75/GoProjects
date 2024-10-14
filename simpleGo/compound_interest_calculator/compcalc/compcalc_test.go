@@ -6,10 +6,8 @@ import (
 
 func TestCompoundInterestCalculation(t *testing.T) {
 	t.Run("valid inputs", func(t *testing.T) {
-		p := 1000.0
-		r := 10.0
-		time := 10.0
-		got, err := CompoundInterestCalculation(p, r, time)
+		cid := CompoundInterestData{Principle: 1000.0, InterestRate: 10.0, Time: 10.0}
+		got, err := cid.Compute()
 		if err != nil {
 			t.Error("error detected when not expected")
 		}
@@ -18,10 +16,8 @@ func TestCompoundInterestCalculation(t *testing.T) {
 	})
 
 	t.Run("negative value", func(t *testing.T) {
-		p := 100.0
-		r := -10.0
-		time := 10.0
-		_, err := CompoundInterestCalculation(p, r, time)
+		cid := CompoundInterestData{Principle: 1000.0, InterestRate: -10.0, Time: 10.0}
+		_, err := cid.Compute()
 		want := ErrNegativeNumberInput
 		if err == nil {
 			t.Fatal("expected error, got no error")
