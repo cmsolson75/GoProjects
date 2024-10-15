@@ -1,4 +1,4 @@
-package calc
+package compcalc
 
 import (
 	"testing"
@@ -25,6 +25,31 @@ func TestCompoundInterestCalculation(t *testing.T) {
 
 		if err != want {
 			t.Errorf("got %s want %s", err, want)
+		}
+	})
+}
+
+func TestIsValidFloat(t *testing.T) {
+	t.Run("valid int string input", func(t *testing.T) {
+		got := IsValidFloat("10")
+		want := true
+		if got != want {
+			t.Errorf("got %t want %t", got, want)
+		}
+	})
+	t.Run("valid float string input", func(t *testing.T) {
+		got := IsValidFloat("12.1")
+		want := true
+		if got != want {
+			t.Errorf("got %t want %t", got, want)
+		}
+	})
+
+	t.Run("invalid float string input", func(t *testing.T) {
+		got := IsValidFloat("12.1b")
+		want := false
+		if got != want {
+			t.Errorf("got %t want %t", got, want)
 		}
 	})
 }
