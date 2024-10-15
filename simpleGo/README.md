@@ -11,3 +11,4 @@ I just want to do a few simple projects to get a handle on the Syntax.
 - [Weight Conversion](./weight-conversion/)
 - [Temperature Conversion](./temperature-converter/)
 - [User Manager](./user-manager/)
+- [Compound Interest Calculator](./compound_interest_calculator/)

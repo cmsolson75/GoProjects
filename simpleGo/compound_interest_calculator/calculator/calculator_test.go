@@ -1,4 +1,4 @@
-package compcalc
+package calculator
 
 import (
 	"testing"

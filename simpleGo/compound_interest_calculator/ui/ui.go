@@ -3,7 +3,7 @@ package ui
 import (
 	"fmt"
 
-	"github.com/cmsolson75/GoProjects/simpleGo/compound_interest_calculator/compcalc"
+	"github.com/cmsolson75/GoProjects/simpleGo/compound_interest_calculator/calculator"
 	"github.com/cmsolson75/GoProjects/simpleGo/compound_interest_calculator/state"
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -21,7 +21,7 @@ type App struct {
 	Frame        *tview.Frame
 }
 
-func (a *App) ReturnErrorModal(err error) {
+func (a *App) ErrorModal(err error) {
 	modal := tview.NewModal().
 		SetText(fmt.Sprintf("Error: %s", err.Error())).
 		AddButtons([]string{"BACK"}).
@@ -33,7 +33,7 @@ func (a *App) ReturnErrorModal(err error) {
 	a.AppSession.SetRoot(modal, true)
 }
 
-func (a *App) ReturnExitModal() {
+func (a *App) ExitModal() {
 	modal := tview.NewModal().
 		SetText("Are you sure you want to quit?").
 		AddButtons([]string{"QUIT", "BACK"}).
@@ -48,10 +48,10 @@ func (a *App) ReturnExitModal() {
 	a.AppSession.SetRoot(modal, true)
 }
 
-func (a *App) CalculateData() error {
+func (a *App) CalculateTableData() error {
 	// Init Empty
 	a.TableData = [][]string{}
-	cid, err := compcalc.InitCompoundInterestDataString(*a.State)
+	cid, err := calculator.InitCompoundInterestDataString(*a.State)
 	if err != nil {
 		return err
 	}
@@ -113,20 +113,20 @@ func (a *App) CreateForm() {
 		AddButton("SUBMIT", func() {
 			err := a.State.CheckEmptyInput()
 			if err != nil {
-				a.ReturnErrorModal(err)
-			} else {
-				err = a.CalculateData()
-				if err != nil {
-					a.ReturnErrorModal(err)
-				} else {
-					// if we are error free
-					a.Text.SetText(a.Output)
-					a.ConstructTable()
-				}
+				a.ErrorModal(err)
+				return
 			}
+			err = a.CalculateTableData()
+			if err != nil {
+				a.ErrorModal(err)
+				return
+			}
+			// if we are error free
+			a.Text.SetText(a.Output)
+			a.ConstructTable()
 		}).
 		AddButton("QUIT", func() {
-			a.ReturnExitModal()
+			a.ExitModal()
 		})
 }
 

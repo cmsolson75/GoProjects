@@ -167,11 +167,11 @@ func (d *CSV) Write() error {
 	return nil
 }
 
-func CSVInit(filename string) (CSV, error) {
-	db := CSV{file: filename}
+func CSVInit(filename string) (*CSV, error) {
+	db := &CSV{file: filename}
 	err := db.Read()
 	if err != nil {
-		return CSV{}, err
+		return &CSV{}, err
 	}
 	return db, nil
 }

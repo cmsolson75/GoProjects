@@ -1,4 +1,4 @@
-package compcalc
+package calculator
 
 import (
 	"errors"
@@ -10,8 +10,10 @@ import (
 	"github.com/cmsolson75/GoProjects/simpleGo/compound_interest_calculator/state"
 )
 
-var ErrNegativeNumberInput = errors.New("non positive input encountered")
-var ErrNonFloatNumberInput = errors.New("input not valid number")
+var (
+	ErrNegativeNumberInput = errors.New("non positive input encountered")
+	ErrNonFloatNumberInput = errors.New("input not valid number")
+)
 
 type CompoundInterestData struct {
 	Principle    float64
@@ -23,9 +25,16 @@ func roundFloatTwoDecimalPlaces(f float64) float64 {
 	return math.Round(f*100) / 100
 }
 
-func (c *CompoundInterestData) Compute() (float64, error) {
+func (c *CompoundInterestData) Validate() error {
 	if c.Principle <= 0 || c.InterestRate <= 0 || c.Time <= 0 {
-		return 0.0, ErrNegativeNumberInput
+		return ErrNegativeNumberInput
+	}
+	return nil
+}
+
+func (c *CompoundInterestData) Compute() (float64, error) {
+	if err := c.Validate(); err != nil {
+		return 0, err
 	}
 
 	amount := roundFloatTwoDecimalPlaces(c.Principle * math.Pow(1+c.InterestRate/100.0, c.Time))
