@@ -1,15 +1,16 @@
-package main
+package countdown
 
 import (
 	"bufio"
 	"bytes"
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/cmsolson75/GoProjects/simpleGo/countdown_timer/audio"
 )
 
 const (
@@ -144,7 +145,7 @@ func (d *DefaultSleeper) Sleep() {
 }
 
 // Could Inject CreateColorBox with a interface
-func Countdown(seconds int, w *Writer, out io.Writer, sleeper Sleeper) {
+func Countdown(seconds int, w *Writer, out io.Writer, sleeper Sleeper, audioPlayer audio.Player) {
 	fmt.Fprint(out, clearTerminal)
 	fmt.Fprint(out, moveCurserStart)
 	for i := seconds; i > 0; i-- {
@@ -156,16 +157,5 @@ func Countdown(seconds int, w *Writer, out io.Writer, sleeper Sleeper) {
 		fmt.Fprint(out, moveCurserStart)
 		w.buffer.Clear()
 	}
-	fmt.Println("Done!")
-}
-
-// I don't think this needs a test
-// This should be in a different place.
-func main() {
-	input := GetUserInput(os.Stdin, "Time: ")
-	w := NewWriter()
-
-	seconds := ParseUserInput(input)
-	Countdown(seconds, w, os.Stdout, &DefaultSleeper{})
-
+	audioPlayer.Play()
 }

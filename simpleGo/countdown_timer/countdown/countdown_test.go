@@ -1,4 +1,4 @@
-package main
+package countdown
 
 import (
 	"bytes"
@@ -110,11 +110,17 @@ type DummySleeper struct{}
 
 func (d *DummySleeper) Sleep() {}
 
+type DummyAudioPlayer struct{}
+
+func (d *DummyAudioPlayer) LoadAudio(file string) {}
+func (d *DummyAudioPlayer) Play()                 {}
+func (d *DummyAudioPlayer) Quit()                 {}
+
 // Bad test: not testing behavior
 func TestCountdown(t *testing.T) {
 	w := NewWriter()
 	buf := bytes.Buffer{}
-	Countdown(2, w, &buf, &DummySleeper{})
+	Countdown(2, w, &buf, &DummySleeper{}, &DummyAudioPlayer{})
 	want := "\x1b[H\x1b[2J\x1b[35m╭────────╮\n\x1b[35m│\x1b[0m00:00:02\x1b[35m│\n\x1b[35m╰────────╯\n\x1b[0m\x1b[H\x1b[2J\x1b[35m╭────────╮\n\x1b[35m│\x1b[0m00:00:01\x1b[35m│\n\x1b[35m╰────────╯\n\x1b[0m\x1b[H\x1b[2J"
 	if buf.String() != want {
 		t.Errorf("got %q want %q", buf.String(), want)
