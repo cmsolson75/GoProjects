@@ -2,6 +2,7 @@ package audio
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"sync"
@@ -11,10 +12,16 @@ import (
 	"github.com/hajimehoshi/go-mp3"
 )
 
+const (
+	sr       = 44100
+	channels = 2
+	format   = oto.FormatSignedInt16LE
+)
+
 type Player interface {
-	LoadAudio(file string)
-	Play()
-	Quit()
+	LoadAudio(file string) error
+	Play() error
+	Quit() error
 }
 
 type AudioPlayer struct {
@@ -23,38 +30,40 @@ type AudioPlayer struct {
 	player    oto.Player
 }
 
-func (a *AudioPlayer) LoadAudio(audioFilePath string) {
+func (a *AudioPlayer) LoadAudio(audioFilePath string) error {
 	fileBytes, err := os.ReadFile(audioFilePath)
 	if err != nil {
-		panic("reading file failed: " + err.Error())
+		return errors.New("reading file failed: " + err.Error())
 	}
 	fileBytesReader := bytes.NewReader(fileBytes)
 
 	decodedMp3, err := mp3.NewDecoder(fileBytesReader)
 	if err != nil {
 		// Handle Errors
-		panic("mp3.NewDecoder failed: " + err.Error())
+		return errors.New("mp3.NewDecoder failed: " + err.Error())
 	}
 	a.audioData = decodedMp3
 
 	op := &oto.NewContextOptions{}
 
-	op.SampleRate = 44100
-	op.ChannelCount = 2
-	op.Format = oto.FormatSignedInt16LE
+	op.SampleRate = sr
+	op.ChannelCount = channels
+	op.Format = format
 	otoCtx, readyChan, err := oto.NewContext(op)
 
 	if err != nil {
-		panic("oto.NewContex failed: " + err.Error())
+		return errors.New("oto.NewContex failed: " + err.Error())
 	}
 	// wait for hardware to be ready
 	<-readyChan
 
 	a.context = *otoCtx
 	a.player = *a.context.NewPlayer(a.audioData)
+
+	return nil
 }
 
-func (a *AudioPlayer) Play() {
+func (a *AudioPlayer) Play() error {
 	a.player.Play()
 	for a.player.IsPlaying() {
 		time.Sleep(time.Millisecond)
@@ -63,16 +72,19 @@ func (a *AudioPlayer) Play() {
 	// Reset play head
 	_, err := a.player.Seek(0, io.SeekStart)
 	if err != nil {
-		panic("player.Seek failed: " + err.Error())
+		return errors.New("player.Seek failed: " + err.Error())
 	}
+
+	return nil
 
 }
 
-func (a *AudioPlayer) Quit() {
+func (a *AudioPlayer) Quit() error {
 	err := a.player.Close()
 	if err != nil {
-		panic(err)
+		return errors.New("error closing file: " + err.Error())
 	}
+	return nil
 }
 
 // Singleton to avoid erros with oto.Context

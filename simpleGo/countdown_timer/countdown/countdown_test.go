@@ -8,7 +8,7 @@ import (
 
 func TestGetUserInput(t *testing.T) {
 	reader := strings.NewReader("10\n")
-	got := GetUserInput(reader, "")
+	got, _ := GetUserInput(reader, "")
 	want := "10"
 
 	if got != want {
@@ -28,42 +28,23 @@ func TestParseUserInput(t *testing.T) {
 		{input: "02:10", want: 130},
 		{input: "00:02:10", want: 130},
 		{input: "01:20:10", want: 4810},
+		{input: "::10", want: 10},
 	}
 
 	for _, tt := range tests {
 		// add in error handling in the future
-		got := ParseUserInput(tt.input)
+		got, _ := ParseUserInput(tt.input)
 		if got != tt.want {
 			t.Errorf("got %d want %d", got, tt.want)
 		}
 	}
 }
 
-func TestTimeBufferClear(t *testing.T) {
-	// Setup buffer
-	b := TimeBuffer{}
-	b.buffer.Write([]byte("Hello "))
-	b.Clear()
-	if b.buffer.Len() != 0 {
-		t.Errorf("expected len 0, got %d", b.buffer.Len())
-	}
-}
-
-func TestTimeBufferString(t *testing.T) {
-	b := TimeBuffer{}
-	b.buffer.Write([]byte("Hello "))
-	got := b.String()
-	want := "Hello "
-
-	if got != want {
-		t.Errorf("got %s want %s", got, want)
-	}
-}
-
 func TestWriterWrite(t *testing.T) {
 	w := NewWriter()
 
-	timeData := TimeData{hours: "10", minutes: "11", seconds: "09"}
+	timeData := TimeData{hours: 10, minutes: 11, seconds: 9}
+
 	w.Write(timeData)
 	got := w.buffer.String()
 	want := "10:11:09 "
@@ -76,13 +57,13 @@ func TestWriterWrite(t *testing.T) {
 func TestTimeConverter(t *testing.T) {
 	tests := []struct {
 		input   int
-		hours   string
-		minutes string
-		seconds string
+		hours   int
+		minutes int
+		seconds int
 	}{
-		{input: 300, hours: "0", minutes: "5", seconds: "0"},
-		{input: 210, hours: "0", minutes: "3", seconds: "30"},
-		{input: 6000, hours: "1", minutes: "40", seconds: "0"},
+		{input: 300, hours: 0, minutes: 5, seconds: 0},
+		{input: 210, hours: 0, minutes: 3, seconds: 30},
+		{input: 6000, hours: 1, minutes: 40, seconds: 0},
 	}
 
 	for _, tt := range tests {
@@ -112,9 +93,9 @@ func (d *DummySleeper) Sleep() {}
 
 type DummyAudioPlayer struct{}
 
-func (d *DummyAudioPlayer) LoadAudio(file string) {}
-func (d *DummyAudioPlayer) Play()                 {}
-func (d *DummyAudioPlayer) Quit()                 {}
+func (d *DummyAudioPlayer) LoadAudio(file string) error { return nil }
+func (d *DummyAudioPlayer) Play() error                 { return nil }
+func (d *DummyAudioPlayer) Quit() error                 { return nil }
 
 // Bad test: not testing behavior
 func TestCountdown(t *testing.T) {
@@ -127,9 +108,9 @@ func TestCountdown(t *testing.T) {
 	}
 }
 
-func assertTimeUnit(t testing.TB, unit, valueGot, valueWant string) {
+func assertTimeUnit(t testing.TB, unit string, valueGot, valueWant int) {
 	t.Helper()
 	if valueGot != valueWant {
-		t.Errorf("%s incorrect: got %s want %s", unit, valueGot, valueWant)
+		t.Errorf("%s incorrect: got %d want %d", unit, valueGot, valueWant)
 	}
 }

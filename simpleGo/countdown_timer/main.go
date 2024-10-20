@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/cmsolson75/GoProjects/simpleGo/countdown_timer/audio"
@@ -13,11 +14,23 @@ const (
 
 func main() {
 	audioInstance := audio.GetAudioPlayer()
-	audioInstance.LoadAudio(alarmSound)
-	input := countdown.GetUserInput(os.Stdin, "Timer Length: ")
+	err := audioInstance.LoadAudio(alarmSound)
+	if err != nil {
+		fmt.Println("Error: ", err)
+		return
+	}
+	input, err := countdown.GetUserInput(os.Stdin, "Timer Length: ")
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
 	w := countdown.NewWriter()
 
-	seconds := countdown.ParseUserInput(input)
+	seconds, err := countdown.ParseUserInput(input)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
 	countdown.Countdown(seconds, w, os.Stdout, &countdown.DefaultSleeper{}, audioInstance)
 	audioInstance.Quit()
 
