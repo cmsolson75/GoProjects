@@ -5,9 +5,6 @@ import (
 	"testing"
 )
 
-// Need to test for error case
-//
-
 func TestInMemoryPriceCreate(t *testing.T) {
 	testTable := []struct {
 		testName          string

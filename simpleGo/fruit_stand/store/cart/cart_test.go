@@ -3,6 +3,8 @@ package cart
 import (
 	"reflect"
 	"testing"
+
+	"github.com/cmsolson75/GoProjects/simpleGo/shopping_cart/store/price"
 )
 
 func TestCartAddItem(t *testing.T) {
@@ -134,7 +136,7 @@ func TestNewCart(t *testing.T) {
 	}
 }
 
-func TestViewItems(t *testing.T) {
+func TestGetItems(t *testing.T) {
 	testTable := []struct {
 		testName  string
 		initItems []map[string]int
@@ -154,13 +156,80 @@ func TestViewItems(t *testing.T) {
 	}
 
 	for _, tt := range testTable {
-		got, err := NewCart(tt.initItems...)
+		c, err := NewCart(tt.initItems...)
 		if err != nil {
 			t.Fatalf("test: %s error encountered when none expected", tt.testName)
 		}
 
-		if reflect.DeepEqual(got, tt.wantItems) {
-			t.Errorf("test: %s \ngot %v want %v", tt.testName, got.items, tt.wantItems)
+		got := c.GetItems()
+
+		if !reflect.DeepEqual(got, tt.wantItems) {
+			t.Errorf("test: %s \ngot %v want %v", tt.testName, got, tt.wantItems)
+		}
+	}
+}
+
+func TestCheckout(t *testing.T) {
+	initInMemoryPrice := []price.Price{{Name: "apple", Amount: 2.20}, {Name: "orange", Amount: 4.10}}
+	p, _ := price.NewInMemoryPrice(initInMemoryPrice...)
+
+	testTable := []struct {
+		testName        string
+		initItems       []map[string]int
+		totalAmountWant float64
+	}{
+		{
+			testName: "basic test",
+			initItems: []map[string]int{
+				{"apple": 2},
+				{"orange": 5},
+			},
+			totalAmountWant: 24.9,
+		},
+	}
+
+	for _, tt := range testTable {
+		c, _ := NewCart(tt.initItems...)
+		got, _ := c.Checkout(p)
+
+		if got != tt.totalAmountWant {
+			t.Errorf("got %.2f want %.2f", got, tt.totalAmountWant)
+		}
+
+	}
+}
+
+func TestCartUpdateNumber(t *testing.T) {
+	testTable := []struct {
+		testName  string
+		initItems []map[string]int
+		itemName  string
+		newNumber int
+		want      map[string]int
+	}{
+		{
+			testName: "basic test",
+			initItems: []map[string]int{
+				{"item": 2},
+			},
+			itemName:  "item",
+			newNumber: 4,
+			want:      map[string]int{"item": 4},
+		},
+	}
+
+	for _, tt := range testTable {
+		c, err := NewCart(tt.initItems...)
+		if err != nil {
+			t.Fatalf("test: %s error encountered when none expected", tt.testName)
+		}
+
+		c.UpdateItem(tt.itemName, tt.newNumber)
+
+		got := c.GetItems()
+
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("test: %s \ngot %q want %q", tt.testName, got, tt.want)
 		}
 	}
 }
