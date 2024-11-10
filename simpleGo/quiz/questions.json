@@ -1,0 +1,257 @@
+[
+    {
+        "Question": "What is the capital city of France?",
+        "Answers": ["A: Berlin", "B: Madrid", "C: Paris", "D: Rome"],
+        "Correct": "C"
+    },
+    {
+        "Question": "Who wrote the play 'Romeo and Juliet'?",
+        "Answers": ["A: Charles Dickens", "B: William Shakespeare", "C: Mark Twain", "D: Jane Austen"],
+        "Correct": "B"
+    },
+    {
+        "Question": "What is the largest planet in our solar system?",
+        "Answers": ["A: Earth", "B: Saturn", "C: Jupiter", "D: Mars"],
+        "Correct": "C"
+    },
+    {
+        "Question": "What is the main ingredient in guacamole?",
+        "Answers": ["A: Tomato", "B: Avocado", "C: Cucumber", "D: Onion"],
+        "Correct": "B"
+    },
+    {
+        "Question": "How many continents are there on Earth?",
+        "Answers": ["A: 5", "B: 6", "C: 7", "D: 8"],
+        "Correct": "C"
+    },
+    {
+        "Question": "What is the chemical symbol for gold?",
+        "Answers": ["A: Au", "B: Ag", "C: Fe", "D: Pb"],
+        "Correct": "A"
+    },
+    {
+        "Question": "Which ocean is the largest?",
+        "Answers": ["A: Atlantic Ocean", "B: Indian Ocean", "C: Arctic Ocean", "D: Pacific Ocean"],
+        "Correct": "D"
+    },
+    {
+        "Question": "How many strings does a standard guitar have?",
+        "Answers": ["A: 4", "B: 5", "C: 6", "D: 7"],
+        "Correct": "C"
+    },
+    {
+        "Question": "In which country were the Olympic Games founded?",
+        "Answers": ["A: Italy", "B: Greece", "C: France", "D: China"],
+        "Correct": "B"
+    },
+    {
+        "Question": "What is the hardest natural substance on Earth?",
+        "Answers": ["A: Gold", "B: Iron", "C: Diamond", "D: Silver"],
+        "Correct": "C"
+    },
+    {
+        "Question": "Who painted the Mona Lisa?",
+        "Answers": ["A: Michelangelo", "B: Pablo Picasso", "C: Leonardo da Vinci", "D: Vincent van Gogh"],
+        "Correct": "C"
+    },
+    {
+        "Question": "Which planet is known as the 'Red Planet'?",
+        "Answers": ["A: Venus", "B: Jupiter", "C: Mars", "D: Saturn"],
+        "Correct": "C"
+    },
+    {
+        "Question": "What is the boiling point of water in Celsius?",
+        "Answers": ["A: 50", "B: 100", "C: 150", "D: 200"],
+        "Correct": "B"
+    },
+    {
+        "Question": "What animal is known as the 'King of the Jungle'?",
+        "Answers": ["A: Tiger", "B: Lion", "C: Elephant", "D: Bear"],
+        "Correct": "B"
+    },
+    {
+        "Question": "What is the capital of Japan?",
+        "Answers": ["A: Beijing", "B: Seoul", "C: Tokyo", "D: Bangkok"],
+        "Correct": "C"
+    },
+    {
+        "Question": "Which element has the atomic number 1?",
+        "Answers": ["A: Helium", "B: Hydrogen", "C: Oxygen", "D: Carbon"],
+        "Correct": "B"
+    },
+    {
+        "Question": "Who discovered gravity?",
+        "Answers": ["A: Albert Einstein", "B: Isaac Newton", "C: Galileo Galilei", "D: Thomas Edison"],
+        "Correct": "B"
+    },
+    {
+        "Question": "Which country is the largest by land area?",
+        "Answers": ["A: USA", "B: Canada", "C: China", "D: Russia"],
+        "Correct": "D"
+    },
+    {
+        "Question": "How many colors are in a rainbow?",
+        "Answers": ["A: 5", "B: 6", "C: 7", "D: 8"],
+        "Correct": "C"
+    },
+    {
+        "Question": "What is the largest mammal on Earth?",
+        "Answers": ["A: African Elephant", "B: Blue Whale", "C: Great White Shark", "D: Giraffe"],
+        "Correct": "B"
+    },
+    {
+        "Question": "Which planet has a day longer than its year?",
+        "Answers": ["A: Venus", "B: Mars", "C: Mercury", "D: Neptune"],
+        "Correct": "A"
+    },
+    {
+        "Question": "Which bird is known for its colorful plumage and impressive dance?",
+        "Answers": ["A: Penguin", "B: Peacock", "C: Parrot", "D: Flamingo"],
+        "Correct": "B"
+    },
+    {
+        "Question": "What is the smallest country in the world?",
+        "Answers": ["A: Monaco", "B: Vatican City", "C: San Marino", "D: Liechtenstein"],
+        "Correct": "B"
+    },
+    {
+        "Question": "Which continent is the Sahara Desert located on?",
+        "Answers": ["A: Asia", "B: South America", "C: Africa", "D: Australia"],
+        "Correct": "C"
+    },
+    {
+        "Question": "What is the primary ingredient in hummus?",
+        "Answers": ["A: Chickpeas", "B: Potatoes", "C: Lentils", "D: Rice"],
+        "Correct": "A"
+    },
+    {
+        "Question": "How many planets are in our solar system?",
+        "Answers": ["A: 7", "B: 8", "C: 9", "D: 10"],
+        "Correct": "B"
+    },
+    {
+        "Question": "What language is primarily spoken in Brazil?",
+        "Answers": ["A: Spanish", "B: Portuguese", "C: Italian", "D: French"],
+        "Correct": "B"
+    },
+    {
+        "Question": "What type of animal is a Komodo dragon?",
+        "Answers": ["A: Mammal", "B: Bird", "C: Reptile", "D: Amphibian"],
+        "Correct": "C"
+    },
+    {
+        "Question": "How many sides does a hexagon have?",
+        "Answers": ["A: 5", "B: 6", "C: 7", "D: 8"],
+        "Correct": "B"
+    },
+    {
+        "Question": "Who invented the lightbulb?",
+        "Answers": ["A: Nikola Tesla", "B: Thomas Edison", "C: Alexander Graham Bell", "D: Galileo"],
+        "Correct": "B"
+    },
+    {
+        "Question": "Which country is famous for inventing pizza?",
+        "Answers": ["A: France", "B: Italy", "C: Spain", "D: Greece"],
+        "Correct": "B"
+    },
+    {
+        "Question": "What is the currency of Japan?",
+        "Answers": ["A: Yen", "B: Won", "C: Dollar", "D: Yuan"],
+        "Correct": "A"
+    },
+    {
+        "Question": "What year did the Titanic sink?",
+        "Answers": ["A: 1905", "B: 1912", "C: 1923", "D: 1935"],
+        "Correct": "B"
+    },
+    {
+        "Question": "What is the tallest mountain in the world?",
+        "Answers": ["A: Mount Kilimanjaro", "B: Mount Fuji", "C: Mount Everest", "D: Mount Denali"],
+        "Correct": "C"
+    },
+    {
+        "Question": "What is the most spoken language in the world?",
+        "Answers": ["A: English", "B: Spanish", "C: Mandarin Chinese", "D: Hindi"],
+        "Correct": "C"
+    },
+    {
+        "Question": "What is the main ingredient in tofu?",
+        "Answers": ["A: Rice", "B: Soybeans", "C: Wheat", "D: Corn"],
+        "Correct": "B"
+    },
+    {
+        "Question": "Which organ in the human body is responsible for pumping blood?",
+        "Answers": ["A: Brain", "B: Liver", "C: Lungs", "D: Heart"],
+        "Correct": "D"
+    },
+    {
+        "Question": "Which chemical element has the symbol 'O'?",
+        "Answers": ["A: Osmium", "B: Oxygen", "C: Oganesson", "D: Oxide"],
+        "Correct": "B"
+    },
+    {
+        "Question": "Which famous scientist developed the theory of relativity?",
+        "Answers": ["A: Isaac Newton", "B: Albert Einstein", "C: Galileo Galilei", "D: Marie Curie"],
+        "Correct": "B"
+    },
+    {
+        "Question": "What is the main language spoken in Argentina?",
+        "Answers": ["A: Portuguese", "B: English", "C: Spanish", "D: Italian"],
+        "Correct": "C"
+    },
+    {
+        "Question": "How many teeth does an adult human usually have?",
+        "Answers": ["A: 28", "B: 30", "C: 32", "D: 34"],
+        "Correct": "C"
+    },
+    {
+        "Question": "What color is the 'M' in the McDonald's logo?",
+        "Answers": ["A: Blue", "B: Green", "C: Red", "D: Yellow"],
+        "Correct": "D"
+    },
+    {
+        "Question": "Which U.S. state is known as the 'Sunshine State'?",
+        "Answers": ["A: California", "B: Texas", "C: Florida", "D: Arizona"],
+        "Correct": "C"
+    },
+    {
+        "Question": "Who wrote 'The Great Gatsby'?",
+        "Answers": ["A: Ernest Hemingway", "B: F. Scott Fitzgerald", "C: Mark Twain", "D: J.D. Salinger"],
+        "Correct": "B"
+    },
+    {
+        "Question": "What type of food is 'sushi' traditionally associated with?",
+        "Answers": ["A: Italy", "B: Japan", "C: Thailand", "D: China"],
+        "Correct": "B"
+    },
+    {
+        "Question": "Which planet is closest to the sun?",
+        "Answers": ["A: Earth", "B: Venus", "C: Mercury", "D: Mars"],
+        "Correct": "C"
+    },
+    {
+        "Question": "What is the currency of the United Kingdom?",
+        "Answers": ["A: Euro", "B: Dollar", "C: Pound Sterling", "D: Yen"],
+        "Correct": "C"
+    },
+    {
+        "Question": "What color is the gemstone emerald?",
+        "Answers": ["A: Blue", "B: Red", "C: Green", "D: Yellow"],
+        "Correct": "C"
+    },
+    {
+        "Question": "Who is known as the 'Father of Computers'?",
+        "Answers": ["A: Charles Babbage", "B: Alan Turing", "C: Bill Gates", "D: Steve Jobs"],
+        "Correct": "A"
+    },
+    {
+        "Question": "Which animal is the symbol of the World Wildlife Fund (WWF)?",
+        "Answers": ["A: Tiger", "B: Elephant", "C: Panda", "D: Gorilla"],
+        "Correct": "C"
+    },
+    {
+        "Question": "What organ helps humans breathe?",
+        "Answers": ["A: Heart", "B: Lungs", "C: Liver", "D: Kidneys"],
+        "Correct": "B"
+    }
+]
