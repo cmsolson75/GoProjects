@@ -1,0 +1,4246 @@
+Project Root: /Users/cameronolson/Developer/dl_work/Prototypes/demo-app-testing/echelon-beta/choir-converter
+
+.
+├── Dockerfile
+├── app.py
+├── choir_backend
+│   ├── __init__.py
+│   ├── inference_config.py
+│   ├── inference_manager.py
+│   ├── models
+│   │   ├── __init__.py
+│   │   ├── choir_generator
+│   │   │   ├── __init__.py
+│   │   │   ├── attentions.py
+│   │   │   ├── commons.py
+│   │   │   ├── discriminators.py
+│   │   │   ├── encoders.py
+│   │   │   ├── generators.py
+│   │   │   ├── modules.py
+│   │   │   ├── normalization.py
+│   │   │   ├── nsf.py
+│   │   │   ├── residuals.py
+│   │   │   └── synthesizers.py
+│   │   └── f0_extractor
+│   │       ├── RMVPE.py
+│   │       └── __init__.py
+│   ├── pipeline.py
+│   ├── system_config
+│   │   ├── config.py
+│   │   ├── v1
+│   │   │   ├── 32000.json
+│   │   │   ├── 40000.json
+│   │   │   └── 48000.json
+│   │   └── v2
+│   │       ├── 32000.json
+│   │       ├── 40000.json
+│   │       └── 48000.json
+│   ├── utils
+│   │   ├── __init__.py
+│   │   ├── split_audio.py
+│   │   └── utils.py
+│   └── voice_converter.py
+├── config.yaml
+├── generated_audio
+│   ├── auido_example_original
+│   │   └── chunk0.wav
+│   ├── auido_example_original.wav
+│   └── output.wav
+├── inference_script.py
+├── model_weights
+│   ├── echelon-vc
+│   │   ├── gospel_model_u67_v2.pth
+│   │   ├── total_fea.npy
+│   │   └── u67search.index
+│   ├── hubert
+│   │   └── contentvec
+│   │       ├── config.json
+│   │       └── pytorch_model.bin
+│   └── rmvpe
+│       └── rmvpe.pt
+└── requirements.txt
+
+16 directories, 43 files
+----------------------
+File Name: Dockerfile
+----------------------
+
+# Use the pre-built PyTorch image with CUDA support
+FROM pytorch/pytorch:2.4.1-cuda11.8-cudnn9-runtime
+
+# Set the working directory in the container
+WORKDIR /app
+
+# Install FFMPEG and other necessary system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the requirements file into the container
+COPY requirements.txt .
+
+# Install the Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the entire project directory into the container
+COPY . .
+
+# Expose the port the app runs on
+EXPOSE 8080
+
+# Command to run the FastAPI app using Uvicorn
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+
+----------------------
+File Name: app.py
+----------------------
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+import tempfile
+import shutil
+import os
+import logging
+import time  # Import time module
+from google.cloud import storage
+import uuid
+import yaml
+
+# Import your inference classes
+from choir_backend.inference_manager import InferenceManager
+from choir_backend.inference_config import InferConfig
+
+from pydantic import BaseModel
+from typing import List
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class InferenceInstance(BaseModel):
+    audio_file_urls: List[str]
+    pitches: List[int]
+
+class InferenceRequest(BaseModel):
+    instances: List[InferenceInstance]
+
+class InferenceResponse(BaseModel):
+    processed_audio_file_urls: List[str]
+
+app = FastAPI()
+
+# Read configuration
+with open("config.yaml") as f:
+    cfg = yaml.load(f, Loader=yaml.FullLoader)
+    logger.info("Configuration loaded successfully")
+
+@app.post("/inference", response_model=InferenceResponse)
+async def run_inference(request: InferenceRequest):
+    logger.info("Received inference request")
+
+    # Check for CUDA availability at the start of the inference process
+    import torch  # Import torch to check CUDA availability
+    logger.info(f"CUDA is available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        logger.info(f"CUDA Device Name: {torch.cuda.get_device_name(0)}")
+    else:
+        logger.warning("CUDA is not available. This might slow down the inference.")
+
+
+    temp_dir = tempfile.mkdtemp()
+    logger.info(f"Created temporary directory at {temp_dir}")
+    
+    try:
+        output_file_urls = []
+        total_start_time = time.time()  # Start total timer
+
+        # Process each instance in the request
+        for instance_idx, instance in enumerate(request.instances):
+            logger.info(f"Processing instance {instance_idx + 1}/{len(request.instances)}")
+
+            if len(instance.audio_file_urls) != len(instance.pitches):
+                logger.error("Number of pitches does not match number of audio files")
+                raise HTTPException(status_code=400, detail="Number of pitches does not match number of audio files")
+
+            storage_client = storage.Client()
+            logger.info("Initialized Google Cloud Storage client")
+
+            for i, file_url in enumerate(instance.audio_file_urls):
+                logger.info(f"Attempting to download file {i + 1}/{len(instance.audio_file_urls)} from URL: {file_url}")
+                
+                # Start timer for file download
+                download_start_time = time.time()
+
+                # Parse GCS URL
+                if not file_url.startswith("gs://"):
+                    logger.error(f"Invalid GCS URL: {file_url}")
+                    raise HTTPException(status_code=400, detail=f"Invalid GCS URL: {file_url}")
+                
+                _, _, bucket_name, *blob_path = file_url.split("/")
+                blob_name = "/".join(blob_path)
+                logger.info(f"Parsed bucket: {bucket_name}, blob: {blob_name}")
+
+                # Download the audio file from GCS
+                bucket = storage_client.bucket(bucket_name)
+                blob = bucket.blob(blob_name)
+                
+                if not blob.exists():
+                    logger.error(f"Blob {blob_name} not found in bucket {bucket_name}")
+                    raise HTTPException(status_code=404, detail=f"Blob {blob_name} not found in bucket {bucket_name}")
+
+                try:
+                    audio_data = blob.download_as_bytes()
+                    logger.info(f"Successfully downloaded blob: {blob_name}")
+                except Exception as e:
+                    logger.error(f"Failed to download blob {blob_name}: {str(e)}")
+                    raise HTTPException(status_code=500, detail=f"Error downloading blob {blob_name}: {str(e)}")
+                
+                # End timer for file download
+                download_end_time = time.time()
+                logger.info(f"Time to download file {i + 1}: {download_end_time - download_start_time:.4f} seconds")
+
+                # Save to a temporary file
+                input_audio_path = os.path.join(temp_dir, f"input_{i}.wav")
+                with open(input_audio_path, 'wb') as f:
+                    f.write(audio_data)
+                logger.info(f"Saved downloaded audio to {input_audio_path}")
+
+                output_audio_path = os.path.join(temp_dir, f"processed_{i}.wav")
+                pitch = instance.pitches[i]
+
+                # Set up InferConfig
+                config = InferConfig(
+                    pitch=pitch,
+                    input_path=input_audio_path,
+                    output_path=output_audio_path,
+                    model_path=cfg["evc"]["model_path"],
+                    index_path=cfg["evc"]["index_path"],
+                    embedder_model=cfg["hubert_dir_path"],
+                )
+                logger.info(f"InferConfig set up with pitch: {pitch}")
+
+                manager = InferenceManager(config)
+
+                # Start timer for inference
+                inference_start_time = time.time()
+
+                logger.info("Running inference")
+                manager.run_inference()
+
+                # End timer for inference
+                inference_end_time = time.time()
+                logger.info(f"Time to run inference for file {i + 1}: {inference_end_time - inference_start_time:.4f} seconds")
+
+                logger.info(f"Inference completed for {input_audio_path}, output saved to {output_audio_path}")
+                processed_blob_name = f"processed_{uuid.uuid4()}.wav"
+                processed_blob = bucket.blob(processed_blob_name)
+                
+                with open(output_audio_path, 'rb') as f:
+                    processed_blob.upload_from_file(f, content_type='audio/wav')
+                logger.info(f"Uploaded processed audio to {processed_blob_name}")
+
+                processed_file_url = f"gs://{bucket_name}/{processed_blob_name}"
+                output_file_urls.append(processed_file_url)
+
+        # Clean up the temporary directory
+        shutil.rmtree(temp_dir)
+        logger.info(f"Temporary directory {temp_dir} deleted")
+
+        # End total timer
+        total_end_time = time.time()
+        logger.info(f"Total time for processing all instances: {total_end_time - total_start_time:.4f} seconds")
+
+        # Return the URLs of the processed files
+        logger.info(f"Returning processed file URLs: {output_file_urls}")
+        try:
+            response_data = {
+                "predictions": [
+                    {"processed_audio_file_urls": output_file_urls}
+                ]
+            }
+            logger.info(response_data)
+            return JSONResponse(content=response_data)
+        except Exception as e:
+            logger.info("Failed to return the response")
+            raise HTTPException(status_code=500, detail="Failed to construct or return response")
+
+    except Exception as e:
+        logger.exception("An error occurred during inference processing")
+        shutil.rmtree(temp_dir)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
+----------------------
+File Name: inference_config.py
+----------------------
+
+from dataclasses import dataclass
+
+
+@dataclass
+class InferConfig:
+    pitch: int
+    input_path: str
+    output_path: str
+    model_path: str
+    index_path: str
+    embedder_model: str
+    split_audio: bool = True
+    hop_length: int = 1
+    protect: float = 0.5
+    volume_envelope: int = 1
+    index_rate: float = 0.5
+    filter_radius: int = 3
+
+
+# Should add in f0 model_path
+
+----------------------
+File Name: inference_manager.py
+----------------------
+
+from .voice_converter import VoiceConverter
+from .inference_config import InferConfig
+
+
+class InferenceManager:
+    def __init__(self, config: InferConfig):
+        """
+        Initialize the InferenceManager with a given configuration.
+
+        Args:
+            config (InferConfig): The configuration for the inference process.
+        """
+        self.config = config
+        self.infer_pipeline = self.initialize_voice_converter()
+
+    @staticmethod
+    def initialize_voice_converter():
+        """
+        Initialize the voice converter pipeline.
+
+        Returns:
+            VoiceConverter: The voice conversion pipeline class.
+        """
+        vc = VoiceConverter()
+        return vc
+
+    def run_inference(self) -> str:
+        """
+        Run the voice conversion inference pipeline using the stored configuration.
+
+        Returns:
+            str: The path to the output audio file.
+        """
+        try:
+            self.infer_pipeline.convert_audio(
+                audio_input_path=self.config.input_path,
+                audio_output_path=self.config.output_path,
+                model_path=self.config.model_path,
+                index_path=self.config.index_path,
+                embedder_model=self.config.embedder_model,
+                pitch=self.config.pitch,
+                index_rate=self.config.index_rate,
+                volume_envelope=self.config.volume_envelope,
+                protect=self.config.protect,
+                hop_length=self.config.hop_length,
+                split_audio=self.config.split_audio,
+                filter_radius=self.config.filter_radius,
+                resample_sample_rate=0,  # Default value, adjust as needed
+                speaker_id=0,  # Default value, adjust as needed
+            )
+            return self.config.output_path
+        except Exception as e:
+            raise RuntimeError(f"An error occurred during audio conversion: {str(e)}")
+
+----------------------
+File Name: attentions.py
+----------------------
+
+import math
+import torch
+
+from .commons import convert_pad_shape
+
+
+class MultiHeadAttention(torch.nn.Module):
+    """
+    Multi-head attention module with optional relative positional encoding and proximal bias.
+
+    Args:
+        channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        n_heads (int): Number of attention heads.
+        p_dropout (float, optional): Dropout probability. Defaults to 0.0.
+        window_size (int, optional): Window size for relative positional encoding. Defaults to None.
+        heads_share (bool, optional): Whether to share relative positional embeddings across heads. Defaults to True.
+        block_length (int, optional): Block length for local attention. Defaults to None.
+        proximal_bias (bool, optional): Whether to use proximal bias in self-attention. Defaults to False.
+        proximal_init (bool, optional): Whether to initialize the key projection weights the same as query projection weights. Defaults to False.
+    """
+
+    def __init__(
+        self,
+        channels,
+        out_channels,
+        n_heads,
+        p_dropout=0.0,
+        window_size=None,
+        heads_share=True,
+        block_length=None,
+        proximal_bias=False,
+        proximal_init=False,
+    ):
+        super().__init__()
+        assert channels % n_heads == 0
+
+        self.channels = channels
+        self.out_channels = out_channels
+        self.n_heads = n_heads
+        self.p_dropout = p_dropout
+        self.window_size = window_size
+        self.heads_share = heads_share
+        self.block_length = block_length
+        self.proximal_bias = proximal_bias
+        self.proximal_init = proximal_init
+        self.attn = None
+
+        self.k_channels = channels // n_heads
+        self.conv_q = torch.nn.Conv1d(channels, channels, 1)
+        self.conv_k = torch.nn.Conv1d(channels, channels, 1)
+        self.conv_v = torch.nn.Conv1d(channels, channels, 1)
+        self.conv_o = torch.nn.Conv1d(channels, out_channels, 1)
+        self.drop = torch.nn.Dropout(p_dropout)
+
+        if window_size is not None:
+            n_heads_rel = 1 if heads_share else n_heads
+            rel_stddev = self.k_channels**-0.5
+            self.emb_rel_k = torch.nn.Parameter(
+                torch.randn(n_heads_rel, window_size * 2 + 1, self.k_channels)
+                * rel_stddev
+            )
+            self.emb_rel_v = torch.nn.Parameter(
+                torch.randn(n_heads_rel, window_size * 2 + 1, self.k_channels)
+                * rel_stddev
+            )
+
+        torch.nn.init.xavier_uniform_(self.conv_q.weight)
+        torch.nn.init.xavier_uniform_(self.conv_k.weight)
+        torch.nn.init.xavier_uniform_(self.conv_v.weight)
+        if proximal_init:
+            with torch.no_grad():
+                self.conv_k.weight.copy_(self.conv_q.weight)
+                self.conv_k.bias.copy_(self.conv_q.bias)
+
+    def forward(self, x, c, attn_mask=None):
+        q = self.conv_q(x)
+        k = self.conv_k(c)
+        v = self.conv_v(c)
+
+        x, self.attn = self.attention(q, k, v, mask=attn_mask)
+
+        x = self.conv_o(x)
+        return x
+
+    def attention(self, query, key, value, mask=None):
+        # reshape [b, d, t] -> [b, n_h, t, d_k]
+        b, d, t_s, t_t = (*key.size(), query.size(2))
+        query = query.view(b, self.n_heads, self.k_channels, t_t).transpose(2, 3)
+        key = key.view(b, self.n_heads, self.k_channels, t_s).transpose(2, 3)
+        value = value.view(b, self.n_heads, self.k_channels, t_s).transpose(2, 3)
+
+        scores = torch.matmul(query / math.sqrt(self.k_channels), key.transpose(-2, -1))
+        if self.window_size is not None:
+            assert (
+                t_s == t_t
+            ), "Relative attention is only available for self-attention."
+            key_relative_embeddings = self._get_relative_embeddings(self.emb_rel_k, t_s)
+            rel_logits = self._matmul_with_relative_keys(
+                query / math.sqrt(self.k_channels), key_relative_embeddings
+            )
+            scores_local = self._relative_position_to_absolute_position(rel_logits)
+            scores = scores + scores_local
+        if self.proximal_bias:
+            assert t_s == t_t, "Proximal bias is only available for self-attention."
+            scores = scores + self._attention_bias_proximal(t_s).to(
+                device=scores.device, dtype=scores.dtype
+            )
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e4)
+            if self.block_length is not None:
+                assert (
+                    t_s == t_t
+                ), "Local attention is only available for self-attention."
+                block_mask = (
+                    torch.ones_like(scores)
+                    .triu(-self.block_length)
+                    .tril(self.block_length)
+                )
+                scores = scores.masked_fill(block_mask == 0, -1e4)
+        p_attn = torch.nn.functional.softmax(scores, dim=-1)  # [b, n_h, t_t, t_s]
+        p_attn = self.drop(p_attn)
+        output = torch.matmul(p_attn, value)
+        if self.window_size is not None:
+            relative_weights = self._absolute_position_to_relative_position(p_attn)
+            value_relative_embeddings = self._get_relative_embeddings(
+                self.emb_rel_v, t_s
+            )
+            output = output + self._matmul_with_relative_values(
+                relative_weights, value_relative_embeddings
+            )
+        output = (
+            output.transpose(2, 3).contiguous().view(b, d, t_t)
+        )  # [b, n_h, t_t, d_k] -> [b, d, t_t]
+        return output, p_attn
+
+    def _matmul_with_relative_values(self, x, y):
+        """
+        x: [b, h, l, m]
+        y: [h or 1, m, d]
+        ret: [b, h, l, d]
+        """
+        ret = torch.matmul(x, y.unsqueeze(0))
+        return ret
+
+    def _matmul_with_relative_keys(self, x, y):
+        """
+        x: [b, h, l, d]
+        y: [h or 1, m, d]
+        ret: [b, h, l, m]
+        """
+        ret = torch.matmul(x, y.unsqueeze(0).transpose(-2, -1))
+        return ret
+
+    def _get_relative_embeddings(self, relative_embeddings, length):
+        # Pad first before slice to avoid using cond ops.
+        pad_length = max(length - (self.window_size + 1), 0)
+        slice_start_position = max((self.window_size + 1) - length, 0)
+        slice_end_position = slice_start_position + 2 * length - 1
+        if pad_length > 0:
+            padded_relative_embeddings = torch.nn.functional.pad(
+                relative_embeddings,
+                convert_pad_shape([[0, 0], [pad_length, pad_length], [0, 0]]),
+            )
+        else:
+            padded_relative_embeddings = relative_embeddings
+        used_relative_embeddings = padded_relative_embeddings[
+            :, slice_start_position:slice_end_position
+        ]
+        return used_relative_embeddings
+
+    def _relative_position_to_absolute_position(self, x):
+        """
+        x: [b, h, l, 2*l-1]
+        ret: [b, h, l, l]
+        """
+        batch, heads, length, _ = x.size()
+
+        # Concat columns of pad to shift from relative to absolute indexing.
+        x = torch.nn.functional.pad(
+            x, convert_pad_shape([[0, 0], [0, 0], [0, 0], [0, 1]])
+        )
+
+        # Concat extra elements so to add up to shape (len+1, 2*len-1).
+        x_flat = x.view([batch, heads, length * 2 * length])
+        x_flat = torch.nn.functional.pad(
+            x_flat, convert_pad_shape([[0, 0], [0, 0], [0, length - 1]])
+        )
+
+        # Reshape and slice out the padded elements.
+        x_final = x_flat.view([batch, heads, length + 1, 2 * length - 1])[
+            :, :, :length, length - 1 :
+        ]
+        return x_final
+
+    def _absolute_position_to_relative_position(self, x):
+        """
+        x: [b, h, l, l]
+        ret: [b, h, l, 2*l-1]
+        """
+        batch, heads, length, _ = x.size()
+        # padd along column
+        x = torch.nn.functional.pad(
+            x, convert_pad_shape([[0, 0], [0, 0], [0, 0], [0, length - 1]])
+        )
+        x_flat = x.view([batch, heads, length**2 + length * (length - 1)])
+        # add 0's in the beginning that will skew the elements after reshape
+        x_flat = torch.nn.functional.pad(
+            x_flat, convert_pad_shape([[0, 0], [0, 0], [length, 0]])
+        )
+        x_final = x_flat.view([batch, heads, length, 2 * length])[:, :, :, 1:]
+        return x_final
+
+    def _attention_bias_proximal(self, length):
+        """Bias for self-attention to encourage attention to close positions.
+        Args:
+            length: an integer scalar.
+        """
+        r = torch.arange(length, dtype=torch.float32)
+        diff = torch.unsqueeze(r, 0) - torch.unsqueeze(r, 1)
+        return torch.unsqueeze(torch.unsqueeze(-torch.log1p(torch.abs(diff)), 0), 0)
+
+
+class FFN(torch.nn.Module):
+    """
+    Feed-forward network module.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        filter_channels (int): Number of filter channels in the convolution layers.
+        kernel_size (int): Kernel size of the convolution layers.
+        p_dropout (float, optional): Dropout probability. Defaults to 0.0.
+        activation (str, optional): Activation function to use. Defaults to None.
+        causal (bool, optional): Whether to use causal padding in the convolution layers. Defaults to False.
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        filter_channels,
+        kernel_size,
+        p_dropout=0.0,
+        activation=None,
+        causal=False,
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.filter_channels = filter_channels
+        self.kernel_size = kernel_size
+        self.p_dropout = p_dropout
+        self.activation = activation
+        self.causal = causal
+
+        if causal:
+            self.padding = self._causal_padding
+        else:
+            self.padding = self._same_padding
+
+        self.conv_1 = torch.nn.Conv1d(in_channels, filter_channels, kernel_size)
+        self.conv_2 = torch.nn.Conv1d(filter_channels, out_channels, kernel_size)
+        self.drop = torch.nn.Dropout(p_dropout)
+
+    def forward(self, x, x_mask):
+        x = self.conv_1(self.padding(x * x_mask))
+        if self.activation == "gelu":
+            x = x * torch.sigmoid(1.702 * x)
+        else:
+            x = torch.relu(x)
+        x = self.drop(x)
+        x = self.conv_2(self.padding(x * x_mask))
+        return x * x_mask
+
+    def _causal_padding(self, x):
+        if self.kernel_size == 1:
+            return x
+        pad_l = self.kernel_size - 1
+        pad_r = 0
+        padding = [[0, 0], [0, 0], [pad_l, pad_r]]
+        x = torch.nn.functional.pad(x, convert_pad_shape(padding))
+        return x
+
+    def _same_padding(self, x):
+        if self.kernel_size == 1:
+            return x
+        pad_l = (self.kernel_size - 1) // 2
+        pad_r = self.kernel_size // 2
+        padding = [[0, 0], [0, 0], [pad_l, pad_r]]
+        x = torch.nn.functional.pad(x, convert_pad_shape(padding))
+        return x
+
+----------------------
+File Name: commons.py
+----------------------
+
+import math
+import torch
+from typing import List, Optional
+
+
+def init_weights(m, mean=0.0, std=0.01):
+    """
+    Initialize the weights of a module.
+
+    Args:
+        m: The module to initialize.
+        mean: The mean of the normal distribution.
+        std: The standard deviation of the normal distribution.
+    """
+    classname = m.__class__.__name__
+    if classname.find("Conv") != -1:
+        m.weight.data.normal_(mean, std)
+
+
+def get_padding(kernel_size, dilation=1):
+    """
+    Calculate the padding needed for a convolution.
+
+    Args:
+        kernel_size: The size of the kernel.
+        dilation: The dilation of the convolution.
+    """
+    return int((kernel_size * dilation - dilation) / 2)
+
+
+def convert_pad_shape(pad_shape):
+    """
+    Convert the pad shape to a list of integers.
+
+    Args:
+        pad_shape: The pad shape..
+    """
+    l = pad_shape[::-1]
+    pad_shape = [item for sublist in l for item in sublist]
+    return pad_shape
+
+
+def kl_divergence(m_p, logs_p, m_q, logs_q):
+    """
+    Calculate the KL divergence between two distributions.
+
+    Args:
+        m_p: The mean of the first distribution.
+        logs_p: The log of the standard deviation of the first distribution.
+        m_q: The mean of the second distribution.
+        logs_q: The log of the standard deviation of the second distribution.
+    """
+    kl = (logs_q - logs_p) - 0.5
+    kl += (
+        0.5 * (torch.exp(2.0 * logs_p) + ((m_p - m_q) ** 2)) * torch.exp(-2.0 * logs_q)
+    )
+    return kl
+
+
+def slice_segments(
+    x: torch.Tensor, ids_str: torch.Tensor, segment_size: int = 4, dim: int = 2
+):
+    """
+    Slice segments from a tensor, handling tensors with different numbers of dimensions.
+
+    Args:
+        x (torch.Tensor): The tensor to slice.
+        ids_str (torch.Tensor): The starting indices of the segments.
+        segment_size (int, optional): The size of each segment. Defaults to 4.
+        dim (int, optional): The dimension to slice across (2D or 3D tensors). Defaults to 2.
+    """
+    if dim == 2:
+        ret = torch.zeros_like(x[:, :segment_size])
+    elif dim == 3:
+        ret = torch.zeros_like(x[:, :, :segment_size])
+
+    for i in range(x.size(0)):
+        idx_str = ids_str[i].item()
+        idx_end = idx_str + segment_size
+        if dim == 2:
+            ret[i] = x[i, idx_str:idx_end]
+        else:
+            ret[i] = x[i, :, idx_str:idx_end]
+
+    return ret
+
+
+def rand_slice_segments(x, x_lengths=None, segment_size=4):
+    """
+    Randomly slice segments from a tensor.
+
+    Args:
+        x: The tensor to slice.
+        x_lengths: The lengths of the sequences.
+        segment_size: The size of each segment.
+    """
+    b, d, t = x.size()
+    if x_lengths is None:
+        x_lengths = t
+    ids_str_max = x_lengths - segment_size + 1
+    ids_str = (torch.rand([b]).to(device=x.device) * ids_str_max).to(dtype=torch.long)
+    ret = slice_segments(x, ids_str, segment_size, dim=3)
+    return ret, ids_str
+
+
+def get_timing_signal_1d(length, channels, min_timescale=1.0, max_timescale=1.0e4):
+    """
+    Generate a 1D timing signal.
+
+    Args:
+        length: The length of the signal.
+        channels: The number of channels of the signal.
+        min_timescale: The minimum timescale.
+        max_timescale: The maximum timescale.
+    """
+    position = torch.arange(length, dtype=torch.float)
+    num_timescales = channels // 2
+    log_timescale_increment = math.log(float(max_timescale) / float(min_timescale)) / (
+        num_timescales - 1
+    )
+    inv_timescales = min_timescale * torch.exp(
+        torch.arange(num_timescales, dtype=torch.float) * -log_timescale_increment
+    )
+    scaled_time = position.unsqueeze(0) * inv_timescales.unsqueeze(1)
+    signal = torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], 0)
+    signal = torch.nn.functional.pad(signal, [0, 0, 0, channels % 2])
+    signal = signal.view(1, channels, length)
+    return signal
+
+
+def subsequent_mask(length):
+    """
+    Generate a subsequent mask.
+
+    Args:
+        length: The length of the sequence.
+    """
+    mask = torch.tril(torch.ones(length, length)).unsqueeze(0).unsqueeze(0)
+    return mask
+
+
+@torch.jit.script
+def fused_add_tanh_sigmoid_multiply(input_a, input_b, n_channels):
+    """
+    Fused add tanh sigmoid multiply operation.
+
+    Args:
+        input_a: The first input tensor.
+        input_b: The second input tensor.
+        n_channels: The number of channels.
+    """
+    n_channels_int = n_channels[0]
+    in_act = input_a + input_b
+    t_act = torch.tanh(in_act[:, :n_channels_int, :])
+    s_act = torch.sigmoid(in_act[:, n_channels_int:, :])
+    acts = t_act * s_act
+    return acts
+
+
+# Zluda, same as previous, but without jit.script
+def fused_add_tanh_sigmoid_multiply_no_jit(input_a, input_b, n_channels):
+    """
+    Fused add tanh sigmoid multiply operation.
+
+    Args:
+        input_a: The first input tensor.
+        input_b: The second input tensor.
+        n_channels: The number of channels.
+    """
+    n_channels_int = n_channels[0]
+    in_act = input_a + input_b
+    t_act = torch.tanh(in_act[:, :n_channels_int, :])
+    s_act = torch.sigmoid(in_act[:, n_channels_int:, :])
+    acts = t_act * s_act
+    return acts
+
+
+def convert_pad_shape(pad_shape: List[List[int]]) -> List[int]:
+    """
+    Convert the pad shape to a list of integers.
+
+    Args:
+        pad_shape: The pad shape.
+    """
+    return torch.tensor(pad_shape).flip(0).reshape(-1).int().tolist()
+
+
+def sequence_mask(length: torch.Tensor, max_length: Optional[int] = None):
+    """
+    Generate a sequence mask.
+
+    Args:
+        length: The lengths of the sequences.
+        max_length: The maximum length of the sequences.
+    """
+    if max_length is None:
+        max_length = length.max()
+    x = torch.arange(max_length, dtype=length.dtype, device=length.device)
+    return x.unsqueeze(0) < length.unsqueeze(1)
+
+
+def clip_grad_value(parameters, clip_value, norm_type=2):
+    """
+    Clip the gradients of a list of parameters.
+
+    Args:
+        parameters: The list of parameters to clip.
+        clip_value: The maximum value of the gradients.
+        norm_type: The type of norm to use for clipping.
+    """
+    if isinstance(parameters, torch.Tensor):
+        parameters = [parameters]
+    parameters = list(filter(lambda p: p.grad is not None, parameters))
+    norm_type = float(norm_type)
+    if clip_value is not None:
+        clip_value = float(clip_value)
+
+    total_norm = 0
+    for p in parameters:
+        param_norm = p.grad.data.norm(norm_type)
+        total_norm += param_norm.item() ** norm_type
+        if clip_value is not None:
+            p.grad.data.clamp_(min=-clip_value, max=clip_value)
+    total_norm = total_norm ** (1.0 / norm_type)
+    return total_norm
+
+----------------------
+File Name: discriminators.py
+----------------------
+
+import torch
+from torch.nn.utils.parametrizations import spectral_norm, weight_norm
+
+from .commons import get_padding
+from .choir_generator.residuals import LRELU_SLOPE
+
+
+class MultiPeriodDiscriminator(torch.nn.Module):
+    """
+    Multi-period discriminator.
+
+    This class implements a multi-period discriminator, which is used to
+    discriminate between real and fake audio signals. The discriminator
+    is composed of a series of convolutional layers that are applied to
+    the input signal at different periods.
+
+    Args:
+        use_spectral_norm (bool): Whether to use spectral normalization.
+            Defaults to False.
+    """
+
+    def __init__(self, use_spectral_norm=False):
+        super(MultiPeriodDiscriminator, self).__init__()
+        periods = [2, 3, 5, 7, 11, 17]
+        self.discriminators = torch.nn.ModuleList(
+            [DiscriminatorS(use_spectral_norm=use_spectral_norm)]
+            + [DiscriminatorP(p, use_spectral_norm=use_spectral_norm) for p in periods]
+        )
+
+    def forward(self, y, y_hat):
+        """
+        Forward pass of the multi-period discriminator.
+
+        Args:
+            y (torch.Tensor): Real audio signal.
+            y_hat (torch.Tensor): Fake audio signal.
+        """
+        y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
+        for d in self.discriminators:
+            y_d_r, fmap_r = d(y)
+            y_d_g, fmap_g = d(y_hat)
+            y_d_rs.append(y_d_r)
+            y_d_gs.append(y_d_g)
+            fmap_rs.append(fmap_r)
+            fmap_gs.append(fmap_g)
+
+        return y_d_rs, y_d_gs, fmap_rs, fmap_gs
+
+
+class MultiPeriodDiscriminatorV2(torch.nn.Module):
+    """
+    Multi-period discriminator V2.
+
+    This class implements a multi-period discriminator V2, which is used
+    to discriminate between real and fake audio signals. The discriminator
+    is composed of a series of convolutional layers that are applied to
+    the input signal at different periods.
+
+    Args:
+        use_spectral_norm (bool): Whether to use spectral normalization.
+            Defaults to False.
+    """
+
+    def __init__(self, use_spectral_norm=False):
+        super(MultiPeriodDiscriminatorV2, self).__init__()
+        periods = [2, 3, 5, 7, 11, 17, 23, 37]
+        self.discriminators = torch.nn.ModuleList(
+            [DiscriminatorS(use_spectral_norm=use_spectral_norm)]
+            + [DiscriminatorP(p, use_spectral_norm=use_spectral_norm) for p in periods]
+        )
+
+    def forward(self, y, y_hat):
+        """
+        Forward pass of the multi-period discriminator V2.
+
+        Args:
+            y (torch.Tensor): Real audio signal.
+            y_hat (torch.Tensor): Fake audio signal.
+        """
+        y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
+        for d in self.discriminators:
+            y_d_r, fmap_r = d(y)
+            y_d_g, fmap_g = d(y_hat)
+            y_d_rs.append(y_d_r)
+            y_d_gs.append(y_d_g)
+            fmap_rs.append(fmap_r)
+            fmap_gs.append(fmap_g)
+
+        return y_d_rs, y_d_gs, fmap_rs, fmap_gs
+
+
+class DiscriminatorS(torch.nn.Module):
+    """
+    Discriminator for the short-term component.
+
+    This class implements a discriminator for the short-term component
+    of the audio signal. The discriminator is composed of a series of
+    convolutional layers that are applied to the input signal.
+    """
+
+    def __init__(self, use_spectral_norm=False):
+        super(DiscriminatorS, self).__init__()
+        norm_f = spectral_norm if use_spectral_norm else weight_norm
+        self.convs = torch.nn.ModuleList(
+            [
+                norm_f(torch.nn.Conv1d(1, 16, 15, 1, padding=7)),
+                norm_f(torch.nn.Conv1d(16, 64, 41, 4, groups=4, padding=20)),
+                norm_f(torch.nn.Conv1d(64, 256, 41, 4, groups=16, padding=20)),
+                norm_f(torch.nn.Conv1d(256, 1024, 41, 4, groups=64, padding=20)),
+                norm_f(torch.nn.Conv1d(1024, 1024, 41, 4, groups=256, padding=20)),
+                norm_f(torch.nn.Conv1d(1024, 1024, 5, 1, padding=2)),
+            ]
+        )
+        self.conv_post = norm_f(torch.nn.Conv1d(1024, 1, 3, 1, padding=1))
+        self.lrelu = torch.nn.LeakyReLU(LRELU_SLOPE)
+
+    def forward(self, x):
+        """
+        Forward pass of the discriminator.
+
+        Args:
+            x (torch.Tensor): Input audio signal.
+        """
+        fmap = []
+        for conv in self.convs:
+            x = self.lrelu(conv(x))
+            fmap.append(x)
+        x = self.conv_post(x)
+        fmap.append(x)
+        x = torch.flatten(x, 1, -1)
+        return x, fmap
+
+
+class DiscriminatorP(torch.nn.Module):
+    """
+    Discriminator for the long-term component.
+
+    This class implements a discriminator for the long-term component
+    of the audio signal. The discriminator is composed of a series of
+    convolutional layers that are applied to the input signal at a given
+    period.
+
+    Args:
+        period (int): Period of the discriminator.
+        kernel_size (int): Kernel size of the convolutional layers.
+            Defaults to 5.
+        stride (int): Stride of the convolutional layers. Defaults to 3.
+        use_spectral_norm (bool): Whether to use spectral normalization.
+            Defaults to False.
+    """
+
+    def __init__(self, period, kernel_size=5, stride=3, use_spectral_norm=False):
+        super(DiscriminatorP, self).__init__()
+        self.period = period
+        norm_f = spectral_norm if use_spectral_norm else weight_norm
+
+        in_channels = [1, 32, 128, 512, 1024]
+        out_channels = [32, 128, 512, 1024, 1024]
+
+        self.convs = torch.nn.ModuleList(
+            [
+                norm_f(
+                    torch.nn.Conv2d(
+                        in_ch,
+                        out_ch,
+                        (kernel_size, 1),
+                        (stride, 1),
+                        padding=(get_padding(kernel_size, 1), 0),
+                    )
+                )
+                for in_ch, out_ch in zip(in_channels, out_channels)
+            ]
+        )
+
+        self.conv_post = norm_f(torch.nn.Conv2d(1024, 1, (3, 1), 1, padding=(1, 0)))
+        self.lrelu = torch.nn.LeakyReLU(LRELU_SLOPE)
+
+    def forward(self, x):
+        """
+        Forward pass of the discriminator.
+
+        Args:
+            x (torch.Tensor): Input audio signal.
+        """
+        fmap = []
+        b, c, t = x.shape
+        if t % self.period != 0:
+            n_pad = self.period - (t % self.period)
+            x = torch.nn.functional.pad(x, (0, n_pad), "reflect")
+        x = x.view(b, c, -1, self.period)
+
+        for conv in self.convs:
+            x = self.lrelu(conv(x))
+            fmap.append(x)
+
+        x = self.conv_post(x)
+        fmap.append(x)
+        x = torch.flatten(x, 1, -1)
+        return x, fmap
+
+----------------------
+File Name: encoders.py
+----------------------
+
+import math
+import torch
+from typing import Optional
+
+from .commons import sequence_mask
+from .modules import WaveNet
+from .normalization import LayerNorm
+from .attentions import FFN, MultiHeadAttention
+
+
+class Encoder(torch.nn.Module):
+    """
+    Encoder module for the Transformer model.
+
+    Args:
+        hidden_channels (int): Number of hidden channels in the encoder.
+        filter_channels (int): Number of filter channels in the feed-forward network.
+        n_heads (int): Number of attention heads.
+        n_layers (int): Number of encoder layers.
+        kernel_size (int, optional): Kernel size of the convolution layers in the feed-forward network. Defaults to 1.
+        p_dropout (float, optional): Dropout probability. Defaults to 0.0.
+        window_size (int, optional): Window size for relative positional encoding. Defaults to 10.
+    """
+
+    def __init__(
+        self,
+        hidden_channels,
+        filter_channels,
+        n_heads,
+        n_layers,
+        kernel_size=1,
+        p_dropout=0.0,
+        window_size=10,
+        **kwargs
+    ):
+        super().__init__()
+        self.hidden_channels = hidden_channels
+        self.filter_channels = filter_channels
+        self.n_heads = n_heads
+        self.n_layers = n_layers
+        self.kernel_size = kernel_size
+        self.p_dropout = p_dropout
+        self.window_size = window_size
+
+        self.drop = torch.nn.Dropout(p_dropout)
+        self.attn_layers = torch.nn.ModuleList()
+        self.norm_layers_1 = torch.nn.ModuleList()
+        self.ffn_layers = torch.nn.ModuleList()
+        self.norm_layers_2 = torch.nn.ModuleList()
+        for i in range(self.n_layers):
+            self.attn_layers.append(
+                MultiHeadAttention(
+                    hidden_channels,
+                    hidden_channels,
+                    n_heads,
+                    p_dropout=p_dropout,
+                    window_size=window_size,
+                )
+            )
+            self.norm_layers_1.append(LayerNorm(hidden_channels))
+            self.ffn_layers.append(
+                FFN(
+                    hidden_channels,
+                    hidden_channels,
+                    filter_channels,
+                    kernel_size,
+                    p_dropout=p_dropout,
+                )
+            )
+            self.norm_layers_2.append(LayerNorm(hidden_channels))
+
+    def forward(self, x, x_mask):
+        attn_mask = x_mask.unsqueeze(2) * x_mask.unsqueeze(-1)
+        x = x * x_mask
+        for i in range(self.n_layers):
+            y = self.attn_layers[i](x, x, attn_mask)
+            y = self.drop(y)
+            x = self.norm_layers_1[i](x + y)
+
+            y = self.ffn_layers[i](x, x_mask)
+            y = self.drop(y)
+            x = self.norm_layers_2[i](x + y)
+        x = x * x_mask
+        return x
+
+
+class TextEncoder(torch.nn.Module):
+    """Text Encoder with configurable embedding dimension.
+
+    Args:
+        out_channels (int): Output channels of the encoder.
+        hidden_channels (int): Hidden channels of the encoder.
+        filter_channels (int): Filter channels of the encoder.
+        n_heads (int): Number of attention heads.
+        n_layers (int): Number of encoder layers.
+        kernel_size (int): Kernel size of the convolutional layers.
+        p_dropout (float): Dropout probability.
+        embedding_dim (int): Embedding dimension for phone embeddings (v1 = 256, v2 = 768).
+        f0 (bool, optional): Whether to use F0 embedding. Defaults to True.
+    """
+
+    def __init__(
+        self,
+        out_channels,
+        hidden_channels,
+        filter_channels,
+        n_heads,
+        n_layers,
+        kernel_size,
+        p_dropout,
+        embedding_dim,
+        f0=True,
+    ):
+        super(TextEncoder, self).__init__()
+        self.out_channels = out_channels
+        self.hidden_channels = hidden_channels
+        self.filter_channels = filter_channels
+        self.n_heads = n_heads
+        self.n_layers = n_layers
+        self.kernel_size = kernel_size
+        self.p_dropout = float(p_dropout)
+        self.emb_phone = torch.nn.Linear(embedding_dim, hidden_channels)
+        self.lrelu = torch.nn.LeakyReLU(0.1, inplace=True)
+        if f0:
+            self.emb_pitch = torch.nn.Embedding(256, hidden_channels)
+        self.encoder = Encoder(
+            hidden_channels,
+            filter_channels,
+            n_heads,
+            n_layers,
+            kernel_size,
+            float(p_dropout),
+        )
+        self.proj = torch.nn.Conv1d(hidden_channels, out_channels * 2, 1)
+
+    def forward(
+        self, phone: torch.Tensor, pitch: Optional[torch.Tensor], lengths: torch.Tensor
+    ):
+        if pitch is None:
+            x = self.emb_phone(phone)
+        else:
+            x = self.emb_phone(phone) + self.emb_pitch(pitch)
+        x = x * math.sqrt(self.hidden_channels)  # [b, t, h]
+        x = self.lrelu(x)
+        x = torch.transpose(x, 1, -1)  # [b, h, t]
+        x_mask = torch.unsqueeze(sequence_mask(lengths, x.size(2)), 1).to(x.dtype)
+        x = self.encoder(x * x_mask, x_mask)
+        stats = self.proj(x) * x_mask
+
+        m, logs = torch.split(stats, self.out_channels, dim=1)
+        return m, logs, x_mask
+
+
+class PosteriorEncoder(torch.nn.Module):
+    """Posterior Encoder for inferring latent representation.
+
+    Args:
+        in_channels (int): Number of channels in the input.
+        out_channels (int): Number of channels in the output.
+        hidden_channels (int): Number of hidden channels in the encoder.
+        kernel_size (int): Kernel size of the convolutional layers.
+        dilation_rate (int): Dilation rate of the convolutional layers.
+        n_layers (int): Number of layers in the encoder.
+        gin_channels (int, optional): Number of channels for the global conditioning input. Defaults to 0.
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        hidden_channels,
+        kernel_size,
+        dilation_rate,
+        n_layers,
+        gin_channels=0,
+    ):
+        super(PosteriorEncoder, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.hidden_channels = hidden_channels
+        self.kernel_size = kernel_size
+        self.dilation_rate = dilation_rate
+        self.n_layers = n_layers
+        self.gin_channels = gin_channels
+
+        self.pre = torch.nn.Conv1d(in_channels, hidden_channels, 1)
+        self.enc = WaveNet(
+            hidden_channels,
+            kernel_size,
+            dilation_rate,
+            n_layers,
+            gin_channels=gin_channels,
+        )
+        self.proj = torch.nn.Conv1d(hidden_channels, out_channels * 2, 1)
+
+    def forward(
+        self, x: torch.Tensor, x_lengths: torch.Tensor, g: Optional[torch.Tensor] = None
+    ):
+        x_mask = torch.unsqueeze(sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
+        x = self.pre(x) * x_mask
+        x = self.enc(x, x_mask, g=g)
+        stats = self.proj(x) * x_mask
+        m, logs = torch.split(stats, self.out_channels, dim=1)
+        z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask
+        return z, m, logs, x_mask
+
+    def remove_weight_norm(self):
+        """Removes weight normalization from the encoder."""
+        self.enc.remove_weight_norm()
+
+    def __prepare_scriptable__(self):
+        """Prepares the module for scripting."""
+        for hook in self.enc._forward_pre_hooks.values():
+            if (
+                hook.__module__ == "torch.nn.utils.parametrizations.weight_norm"
+                and hook.__class__.__name__ == "WeightNorm"
+            ):
+                torch.nn.utils.remove_weight_norm(self.enc)
+        return self
+
+----------------------
+File Name: generators.py
+----------------------
+
+import torch
+from torch.nn.utils import remove_weight_norm
+from torch.nn.utils.parametrizations import weight_norm
+from typing import Optional
+
+from .residuals import LRELU_SLOPE, ResBlock1, ResBlock2
+from .commons import init_weights
+
+
+class Generator(torch.nn.Module):
+    """Generator for synthesizing audio. Optimized for performance and quality.
+
+    Args:
+        initial_channel (int): Number of channels in the initial convolutional layer.
+        resblock (str): Type of residual block to use (1 or 2).
+        resblock_kernel_sizes (list): Kernel sizes of the residual blocks.
+        resblock_dilation_sizes (list): Dilation rates of the residual blocks.
+        upsample_rates (list): Upsampling rates.
+        upsample_initial_channel (int): Number of channels in the initial upsampling layer.
+        upsample_kernel_sizes (list): Kernel sizes of the upsampling layers.
+        gin_channels (int, optional): Number of channels for the global conditioning input. Defaults to 0.
+    """
+
+    def __init__(
+        self,
+        initial_channel,
+        resblock,
+        resblock_kernel_sizes,
+        resblock_dilation_sizes,
+        upsample_rates,
+        upsample_initial_channel,
+        upsample_kernel_sizes,
+        gin_channels=0,
+    ):
+        super(Generator, self).__init__()
+        self.num_kernels = len(resblock_kernel_sizes)
+        self.num_upsamples = len(upsample_rates)
+        self.conv_pre = torch.nn.Conv1d(
+            initial_channel, upsample_initial_channel, 7, 1, padding=3
+        )
+        resblock = ResBlock1 if resblock == "1" else ResBlock2
+
+        self.ups_and_resblocks = torch.nn.ModuleList()
+        for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
+            self.ups_and_resblocks.append(
+                weight_norm(
+                    torch.nn.ConvTranspose1d(
+                        upsample_initial_channel // (2**i),
+                        upsample_initial_channel // (2 ** (i + 1)),
+                        k,
+                        u,
+                        padding=(k - u) // 2,
+                    )
+                )
+            )
+            ch = upsample_initial_channel // (2 ** (i + 1))
+            for j, (k, d) in enumerate(
+                zip(resblock_kernel_sizes, resblock_dilation_sizes)
+            ):
+                self.ups_and_resblocks.append(resblock(ch, k, d))
+
+        self.conv_post = torch.nn.Conv1d(ch, 1, 7, 1, padding=3, bias=False)
+        self.ups_and_resblocks.apply(init_weights)
+
+        if gin_channels != 0:
+            self.cond = torch.nn.Conv1d(gin_channels, upsample_initial_channel, 1)
+
+        def forward(self, x: torch.Tensor, g: Optional[torch.Tensor] = None):
+            x = self.conv_pre(x)
+            if g is not None:
+                x = x + self.cond(g)
+
+            resblock_idx = 0
+            for _ in range(self.num_upsamples):
+                x = torch.nn.functional.leaky_relu(x, LRELU_SLOPE)
+                x = self.ups_and_resblocks[resblock_idx](x)
+                resblock_idx += 1
+                xs = 0
+                for _ in range(self.num_kernels):
+                    xs += self.ups_and_resblocks[resblock_idx](x)
+                    resblock_idx += 1
+                x = xs / self.num_kernels
+
+            x = torch.nn.functional.leaky_relu(x)
+            x = self.conv_post(x)
+            x = torch.tanh(x)
+
+            return x
+
+    def __prepare_scriptable__(self):
+        """Prepares the module for scripting."""
+        for l in self.ups_and_resblocks:
+            for hook in l._forward_pre_hooks.values():
+                if (
+                    hook.__module__ == "torch.nn.utils.parametrizations.weight_norm"
+                    and hook.__class__.__name__ == "WeightNorm"
+                ):
+                    torch.nn.utils.remove_weight_norm(l)
+        return self
+
+    def remove_weight_norm(self):
+        """Removes weight normalization from the upsampling and residual blocks."""
+        for l in self.ups_and_resblocks:
+            remove_weight_norm(l)
+
+
+class SineGen(torch.nn.Module):
+    """Sine wave generator.
+
+    Args:
+        samp_rate (int): Sampling rate in Hz.
+        harmonic_num (int, optional): Number of harmonic overtones. Defaults to 0.
+        sine_amp (float, optional): Amplitude of sine waveform. Defaults to 0.1.
+        noise_std (float, optional): Standard deviation of Gaussian noise. Defaults to 0.003.
+        voiced_threshold (float, optional): F0 threshold for voiced/unvoiced classification. Defaults to 0.
+        flag_for_pulse (bool, optional): Whether this SineGen is used inside PulseGen. Defaults to False.
+    """
+
+    def __init__(
+        self,
+        samp_rate,
+        harmonic_num=0,
+        sine_amp=0.1,
+        noise_std=0.003,
+        voiced_threshold=0,
+        flag_for_pulse=False,
+    ):
+        super(SineGen, self).__init__()
+        self.sine_amp = sine_amp
+        self.noise_std = noise_std
+        self.harmonic_num = harmonic_num
+        self.dim = self.harmonic_num + 1
+        self.sample_rate = samp_rate
+        self.voiced_threshold = voiced_threshold
+
+    def _f02uv(self, f0):
+        """Converts F0 to voiced/unvoiced signal.
+
+        Args:
+            f0 (torch.Tensor): F0 tensor with shape (batch_size, length, 1)..
+        """
+        uv = torch.ones_like(f0)
+        uv = uv * (f0 > self.voiced_threshold)
+        return uv
+
+    def forward(self, f0: torch.Tensor, upp: int):
+        """Generates sine waves.
+
+        Args:
+            f0 (torch.Tensor): F0 tensor with shape (batch_size, length, 1).
+            upp (int): Upsampling factor.
+        """
+        with torch.no_grad():
+            f0 = f0[:, None].transpose(1, 2)
+            f0_buf = torch.zeros(f0.shape[0], f0.shape[1], self.dim, device=f0.device)
+            f0_buf[:, :, 0] = f0[:, :, 0]
+            f0_buf[:, :, 1:] = (
+                f0_buf[:, :, 0:1]
+                * torch.arange(2, self.harmonic_num + 2, device=f0.device)[
+                    None, None, :
+                ]
+            )
+            rad_values = (f0_buf / float(self.sample_rate)) % 1
+            rand_ini = torch.rand(
+                f0_buf.shape[0], f0_buf.shape[2], device=f0_buf.device
+            )
+            rand_ini[:, 0] = 0
+            rad_values[:, 0, :] = rad_values[:, 0, :] + rand_ini
+            tmp_over_one = torch.cumsum(rad_values, 1)
+            tmp_over_one *= upp
+            tmp_over_one = torch.nn.functional.interpolate(
+                tmp_over_one.transpose(2, 1),
+                scale_factor=float(upp),
+                mode="linear",
+                align_corners=True,
+            ).transpose(2, 1)
+            rad_values = torch.nn.functional.interpolate(
+                rad_values.transpose(2, 1), scale_factor=float(upp), mode="nearest"
+            ).transpose(2, 1)
+            tmp_over_one %= 1
+            tmp_over_one_idx = (tmp_over_one[:, 1:, :] - tmp_over_one[:, :-1, :]) < 0
+            cumsum_shift = torch.zeros_like(rad_values)
+            cumsum_shift[:, 1:, :] = tmp_over_one_idx * -1.0
+            sine_waves = torch.sin(
+                torch.cumsum(rad_values + cumsum_shift, dim=1) * 2 * torch.pi
+            )
+            sine_waves = sine_waves * self.sine_amp
+            uv = self._f02uv(f0)
+            uv = torch.nn.functional.interpolate(
+                uv.transpose(2, 1), scale_factor=float(upp), mode="nearest"
+            ).transpose(2, 1)
+            noise_amp = uv * self.noise_std + (1 - uv) * self.sine_amp / 3
+            noise = noise_amp * torch.randn_like(sine_waves)
+            sine_waves = sine_waves * uv + noise
+        return sine_waves, uv, noise
+
+----------------------
+File Name: modules.py
+----------------------
+
+import torch
+from .commons import (
+    fused_add_tanh_sigmoid_multiply_no_jit,
+    fused_add_tanh_sigmoid_multiply,
+)
+
+
+class WaveNet(torch.nn.Module):
+    """WaveNet residual blocks as used in WaveGlow
+
+    Args:
+        hidden_channels (int): Number of hidden channels.
+        kernel_size (int): Size of the convolutional kernel.
+        dilation_rate (int): Dilation rate of the convolution.
+        n_layers (int): Number of convolutional layers.
+        gin_channels (int, optional): Number of conditioning channels. Defaults to 0.
+        p_dropout (float, optional): Dropout probability. Defaults to 0.
+    """
+
+    def __init__(
+        self,
+        hidden_channels,
+        kernel_size,
+        dilation_rate,
+        n_layers,
+        gin_channels=0,
+        p_dropout=0,
+    ):
+        super(WaveNet, self).__init__()
+        assert kernel_size % 2 == 1
+        self.hidden_channels = hidden_channels
+        self.kernel_size = (kernel_size,)
+        self.dilation_rate = dilation_rate
+        self.n_layers = n_layers
+        self.gin_channels = gin_channels
+        self.p_dropout = p_dropout
+
+        self.in_layers = torch.nn.ModuleList()
+        self.res_skip_layers = torch.nn.ModuleList()
+        self.drop = torch.nn.Dropout(p_dropout)
+
+        if gin_channels != 0:
+            cond_layer = torch.nn.Conv1d(
+                gin_channels, 2 * hidden_channels * n_layers, 1
+            )
+            self.cond_layer = torch.nn.utils.parametrizations.weight_norm(
+                cond_layer, name="weight"
+            )
+
+        dilations = [dilation_rate**i for i in range(n_layers)]
+        paddings = [(kernel_size * d - d) // 2 for d in dilations]
+
+        for i in range(n_layers):
+            in_layer = torch.nn.Conv1d(
+                hidden_channels,
+                2 * hidden_channels,
+                kernel_size,
+                dilation=dilations[i],
+                padding=paddings[i],
+            )
+            in_layer = torch.nn.utils.parametrizations.weight_norm(
+                in_layer, name="weight"
+            )
+            self.in_layers.append(in_layer)
+
+            res_skip_channels = (
+                hidden_channels if i == n_layers - 1 else 2 * hidden_channels
+            )
+
+            res_skip_layer = torch.nn.Conv1d(hidden_channels, res_skip_channels, 1)
+            res_skip_layer = torch.nn.utils.parametrizations.weight_norm(
+                res_skip_layer, name="weight"
+            )
+            self.res_skip_layers.append(res_skip_layer)
+
+    def forward(self, x, x_mask, g=None, **kwargs):
+        """Forward pass.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, hidden_channels, time_steps).
+            x_mask (torch.Tensor): Mask tensor of shape (batch_size, 1, time_steps).
+            g (torch.Tensor, optional): Conditioning tensor of shape (batch_size, gin_channels, time_steps).
+                Defaults to None.
+        """
+        output = torch.zeros_like(x)
+        n_channels_tensor = torch.IntTensor([self.hidden_channels])
+
+        if g is not None:
+            g = self.cond_layer(g)
+
+        # Zluda
+        is_zluda = x.device.type == "cuda" and torch.cuda.get_device_name().endswith(
+            "[ZLUDA]"
+        )
+
+        for i in range(self.n_layers):
+            x_in = self.in_layers[i](x)
+            if g is not None:
+                cond_offset = i * 2 * self.hidden_channels
+                g_l = g[:, cond_offset : cond_offset + 2 * self.hidden_channels, :]
+            else:
+                g_l = torch.zeros_like(x_in)
+
+            # Preventing HIP crash by not using jit-decorated function
+            if is_zluda:
+                acts = fused_add_tanh_sigmoid_multiply_no_jit(
+                    x_in, g_l, n_channels_tensor
+                )
+            else:
+                acts = fused_add_tanh_sigmoid_multiply(x_in, g_l, n_channels_tensor)
+
+            acts = self.drop(acts)
+
+            res_skip_acts = self.res_skip_layers[i](acts)
+            if i < self.n_layers - 1:
+                res_acts = res_skip_acts[:, : self.hidden_channels, :]
+                x = (x + res_acts) * x_mask
+                output = output + res_skip_acts[:, self.hidden_channels :, :]
+            else:
+                output = output + res_skip_acts
+        return output * x_mask
+
+    def remove_weight_norm(self):
+        """Remove weight normalization from the module."""
+        if self.gin_channels != 0:
+            torch.nn.utils.remove_weight_norm(self.cond_layer)
+        for l in self.in_layers:
+            torch.nn.utils.remove_weight_norm(l)
+        for l in self.res_skip_layers:
+            torch.nn.utils.remove_weight_norm(l)
+
+----------------------
+File Name: normalization.py
+----------------------
+
+import torch
+
+
+class LayerNorm(torch.nn.Module):
+    """Layer normalization module.
+
+    Args:
+        channels (int): Number of channels.
+        eps (float, optional): Epsilon value for numerical stability. Defaults to 1e-5.
+    """
+
+    def __init__(self, channels, eps=1e-5):
+        super().__init__()
+        self.eps = eps
+        self.gamma = torch.nn.Parameter(torch.ones(channels))
+        self.beta = torch.nn.Parameter(torch.zeros(channels))
+
+    def forward(self, x):
+        """Forward pass.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, channels, time_steps).
+
+        """
+        # Transpose to (batch_size, time_steps, channels) for layer_norm
+        x = x.transpose(1, -1)
+        x = torch.nn.functional.layer_norm(
+            x, (x.size(-1),), self.gamma, self.beta, self.eps
+        )
+        # Transpose back to (batch_size, channels, time_steps)
+        return x.transpose(1, -1)
+
+----------------------
+File Name: nsf.py
+----------------------
+
+import math
+import torch
+from torch.nn.utils import remove_weight_norm
+from torch.nn.utils.parametrizations import weight_norm
+from typing import Optional
+
+from .generators import SineGen
+from .residuals import LRELU_SLOPE, ResBlock1, ResBlock2
+from .commons import init_weights
+
+
+class SourceModuleHnNSF(torch.nn.Module):
+    """
+    Source Module for harmonic-plus-noise excitation.
+
+    Args:
+        sample_rate (int): Sampling rate in Hz.
+        harmonic_num (int, optional): Number of harmonics above F0. Defaults to 0.
+        sine_amp (float, optional): Amplitude of sine source signal. Defaults to 0.1.
+        add_noise_std (float, optional): Standard deviation of additive Gaussian noise. Defaults to 0.003.
+        voiced_threshod (float, optional): Threshold to set voiced/unvoiced given F0. Defaults to 0.
+        is_half (bool, optional): Whether to use half precision. Defaults to True.
+    """
+
+    def __init__(
+        self,
+        sample_rate,
+        harmonic_num=0,
+        sine_amp=0.1,
+        add_noise_std=0.003,
+        voiced_threshod=0,
+        is_half=True,
+    ):
+        super(SourceModuleHnNSF, self).__init__()
+
+        self.sine_amp = sine_amp
+        self.noise_std = add_noise_std
+        self.is_half = is_half
+
+        self.l_sin_gen = SineGen(
+            sample_rate, harmonic_num, sine_amp, add_noise_std, voiced_threshod
+        )
+        self.l_linear = torch.nn.Linear(harmonic_num + 1, 1)
+        self.l_tanh = torch.nn.Tanh()
+
+    def forward(self, x: torch.Tensor, upsample_factor: int = 1):
+        sine_wavs, uv, _ = self.l_sin_gen(x, upsample_factor)
+        sine_wavs = sine_wavs.to(dtype=self.l_linear.weight.dtype)
+        sine_merge = self.l_tanh(self.l_linear(sine_wavs))
+        return sine_merge, None, None
+
+
+class GeneratorNSF(torch.nn.Module):
+    """
+    Generator for synthesizing audio using the NSF (Neural Source Filter) approach.
+
+    Args:
+        initial_channel (int): Number of channels in the initial convolutional layer.
+        resblock (str): Type of residual block to use (1 or 2).
+        resblock_kernel_sizes (list): Kernel sizes of the residual blocks.
+        resblock_dilation_sizes (list): Dilation rates of the residual blocks.
+        upsample_rates (list): Upsampling rates.
+        upsample_initial_channel (int): Number of channels in the initial upsampling layer.
+        upsample_kernel_sizes (list): Kernel sizes of the upsampling layers.
+        gin_channels (int): Number of channels for the global conditioning input.
+        sr (int): Sampling rate.
+        is_half (bool, optional): Whether to use half precision. Defaults to False.
+    """
+
+    def __init__(
+        self,
+        initial_channel,
+        resblock,
+        resblock_kernel_sizes,
+        resblock_dilation_sizes,
+        upsample_rates,
+        upsample_initial_channel,
+        upsample_kernel_sizes,
+        gin_channels,
+        sr,
+        is_half=False,
+    ):
+        super(GeneratorNSF, self).__init__()
+
+        self.num_kernels = len(resblock_kernel_sizes)
+        self.num_upsamples = len(upsample_rates)
+        self.f0_upsamp = torch.nn.Upsample(scale_factor=math.prod(upsample_rates))
+        self.m_source = SourceModuleHnNSF(
+            sample_rate=sr, harmonic_num=0, is_half=is_half
+        )
+
+        self.conv_pre = torch.nn.Conv1d(
+            initial_channel, upsample_initial_channel, 7, 1, padding=3
+        )
+        resblock_cls = ResBlock1 if resblock == "1" else ResBlock2
+
+        self.ups = torch.nn.ModuleList()
+        self.noise_convs = torch.nn.ModuleList()
+
+        channels = [
+            upsample_initial_channel // (2 ** (i + 1))
+            for i in range(len(upsample_rates))
+        ]
+        stride_f0s = [
+            math.prod(upsample_rates[i + 1 :]) if i + 1 < len(upsample_rates) else 1
+            for i in range(len(upsample_rates))
+        ]
+
+        for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
+            self.ups.append(
+                weight_norm(
+                    torch.nn.ConvTranspose1d(
+                        upsample_initial_channel // (2**i),
+                        channels[i],
+                        k,
+                        u,
+                        padding=(k - u) // 2,
+                    )
+                )
+            )
+
+            self.noise_convs.append(
+                torch.nn.Conv1d(
+                    1,
+                    channels[i],
+                    kernel_size=(stride_f0s[i] * 2 if stride_f0s[i] > 1 else 1),
+                    stride=stride_f0s[i],
+                    padding=(stride_f0s[i] // 2 if stride_f0s[i] > 1 else 0),
+                )
+            )
+
+        self.resblocks = torch.nn.ModuleList(
+            [
+                resblock_cls(channels[i], k, d)
+                for i in range(len(self.ups))
+                for k, d in zip(resblock_kernel_sizes, resblock_dilation_sizes)
+            ]
+        )
+
+        self.conv_post = torch.nn.Conv1d(channels[-1], 1, 7, 1, padding=3, bias=False)
+        self.ups.apply(init_weights)
+
+        if gin_channels != 0:
+            self.cond = torch.nn.Conv1d(gin_channels, upsample_initial_channel, 1)
+
+        self.upp = math.prod(upsample_rates)
+        self.lrelu_slope = LRELU_SLOPE
+
+    def forward(self, x, f0, g: Optional[torch.Tensor] = None):
+        har_source, _, _ = self.m_source(f0, self.upp)
+        har_source = har_source.transpose(1, 2)
+        x = self.conv_pre(x)
+
+        if g is not None:
+            x = x + self.cond(g)
+
+        for i, (ups, noise_convs) in enumerate(zip(self.ups, self.noise_convs)):
+            x = torch.nn.functional.leaky_relu(x, self.lrelu_slope)
+            x = ups(x)
+            x = x + noise_convs(har_source)
+
+            xs = sum(
+                [
+                    resblock(x)
+                    for j, resblock in enumerate(self.resblocks)
+                    if j in range(i * self.num_kernels, (i + 1) * self.num_kernels)
+                ]
+            )
+            x = xs / self.num_kernels
+
+        x = torch.nn.functional.leaky_relu(x)
+        x = torch.tanh(self.conv_post(x))
+        return x
+
+    def remove_weight_norm(self):
+        for l in self.ups:
+            remove_weight_norm(l)
+        for l in self.resblocks:
+            l.remove_weight_norm()
+
+    def __prepare_scriptable__(self):
+        for l in self.ups:
+            for hook in l._forward_pre_hooks.values():
+                if (
+                    hook.__module__ == "torch.nn.utils.parametrizations.weight_norm"
+                    and hook.__class__.__name__ == "WeightNorm"
+                ):
+                    remove_weight_norm(l)
+        for l in self.resblocks:
+            for hook in l._forward_pre_hooks.values():
+                if (
+                    hook.__module__ == "torch.nn.utils.parametrizations.weight_norm"
+                    and hook.__class__.__name__ == "WeightNorm"
+                ):
+                    remove_weight_norm(l)
+        return self
+
+----------------------
+File Name: residuals.py
+----------------------
+
+from typing import Optional
+import torch
+from torch.nn.utils import remove_weight_norm
+from torch.nn.utils.parametrizations import weight_norm
+
+from .modules import WaveNet
+from .commons import get_padding, init_weights
+
+LRELU_SLOPE = 0.1
+
+
+# Helper functions
+def create_conv1d_layer(channels, kernel_size, dilation):
+    return weight_norm(
+        torch.nn.Conv1d(
+            channels,
+            channels,
+            kernel_size,
+            1,
+            dilation=dilation,
+            padding=get_padding(kernel_size, dilation),
+        )
+    )
+
+
+def apply_mask(tensor, mask):
+    return tensor * mask if mask is not None else tensor
+
+
+class ResBlockBase(torch.nn.Module):
+    def __init__(self, channels, kernel_size, dilations):
+        super(ResBlockBase, self).__init__()
+        self.convs1 = torch.nn.ModuleList(
+            [create_conv1d_layer(channels, kernel_size, d) for d in dilations]
+        )
+        self.convs1.apply(init_weights)
+
+        self.convs2 = torch.nn.ModuleList(
+            [create_conv1d_layer(channels, kernel_size, 1) for _ in dilations]
+        )
+        self.convs2.apply(init_weights)
+
+    def forward(self, x, x_mask=None):
+        for c1, c2 in zip(self.convs1, self.convs2):
+            xt = torch.nn.functional.leaky_relu(x, LRELU_SLOPE)
+            xt = apply_mask(xt, x_mask)
+            xt = torch.nn.functional.leaky_relu(c1(xt), LRELU_SLOPE)
+            xt = apply_mask(xt, x_mask)
+            xt = c2(xt)
+            x = xt + x
+        return apply_mask(x, x_mask)
+
+    def remove_weight_norm(self):
+        for conv in self.convs1 + self.convs2:
+            remove_weight_norm(conv)
+
+
+class ResBlock1(ResBlockBase):
+    def __init__(self, channels, kernel_size=3, dilation=(1, 3, 5)):
+        super(ResBlock1, self).__init__(channels, kernel_size, dilation)
+
+
+class ResBlock2(ResBlockBase):
+    def __init__(self, channels, kernel_size=3, dilation=(1, 3)):
+        super(ResBlock2, self).__init__(channels, kernel_size, dilation)
+
+
+class Log(torch.nn.Module):
+    """Logarithm module for flow-based models.
+
+    This module computes the logarithm of the input and its log determinant.
+    During reverse, it computes the exponential of the input.
+    """
+
+    def forward(self, x, x_mask, reverse=False, **kwargs):
+        """Forward pass.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+            x_mask (torch.Tensor): Mask tensor.
+            reverse (bool, optional): Whether to reverse the operation. Defaults to False.
+        """
+        if not reverse:
+            y = torch.log(torch.clamp_min(x, 1e-5)) * x_mask
+            logdet = torch.sum(-y, [1, 2])
+            return y, logdet
+        else:
+            x = torch.exp(x) * x_mask
+            return x
+
+
+class Flip(torch.nn.Module):
+    """Flip module for flow-based models.
+
+    This module flips the input along the time dimension.
+    """
+
+    def forward(self, x, *args, reverse=False, **kwargs):
+        """Forward pass.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+            reverse (bool, optional): Whether to reverse the operation. Defaults to False.
+        """
+        x = torch.flip(x, [1])
+        if not reverse:
+            logdet = torch.zeros(x.size(0)).to(dtype=x.dtype, device=x.device)
+            return x, logdet
+        else:
+            return x
+
+
+class ElementwiseAffine(torch.nn.Module):
+    """Elementwise affine transformation module for flow-based models.
+
+    This module performs an elementwise affine transformation on the input.
+
+    Args:
+        channels (int): Number of channels.
+
+    """
+
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
+        self.m = torch.nn.Parameter(torch.zeros(channels, 1))
+        self.logs = torch.nn.Parameter(torch.zeros(channels, 1))
+
+    def forward(self, x, x_mask, reverse=False, **kwargs):
+        """Forward pass.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+            x_mask (torch.Tensor): Mask tensor.
+            reverse (bool, optional): Whether to reverse the operation. Defaults to False.
+        """
+        if not reverse:
+            y = self.m + torch.exp(self.logs) * x
+            y = y * x_mask
+            logdet = torch.sum(self.logs * x_mask, [1, 2])
+            return y, logdet
+        else:
+            x = (x - self.m) * torch.exp(-self.logs) * x_mask
+            return x
+
+
+class ResidualCouplingBlock(torch.nn.Module):
+    """Residual Coupling Block for normalizing flow.
+
+    Args:
+        channels (int): Number of channels in the input.
+        hidden_channels (int): Number of hidden channels in the coupling layer.
+        kernel_size (int): Kernel size of the convolutional layers.
+        dilation_rate (int): Dilation rate of the convolutional layers.
+        n_layers (int): Number of layers in the coupling layer.
+        n_flows (int, optional): Number of coupling layers in the block. Defaults to 4.
+        gin_channels (int, optional): Number of channels for the global conditioning input. Defaults to 0.
+    """
+
+    def __init__(
+        self,
+        channels,
+        hidden_channels,
+        kernel_size,
+        dilation_rate,
+        n_layers,
+        n_flows=4,
+        gin_channels=0,
+    ):
+        super(ResidualCouplingBlock, self).__init__()
+        self.channels = channels
+        self.hidden_channels = hidden_channels
+        self.kernel_size = kernel_size
+        self.dilation_rate = dilation_rate
+        self.n_layers = n_layers
+        self.n_flows = n_flows
+        self.gin_channels = gin_channels
+
+        self.flows = torch.nn.ModuleList()
+        for i in range(n_flows):
+            self.flows.append(
+                ResidualCouplingLayer(
+                    channels,
+                    hidden_channels,
+                    kernel_size,
+                    dilation_rate,
+                    n_layers,
+                    gin_channels=gin_channels,
+                    mean_only=True,
+                )
+            )
+            self.flows.append(Flip())
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        x_mask: torch.Tensor,
+        g: Optional[torch.Tensor] = None,
+        reverse: bool = False,
+    ):
+        if not reverse:
+            for flow in self.flows:
+                x, _ = flow(x, x_mask, g=g, reverse=reverse)
+        else:
+            for flow in reversed(self.flows):
+                x = flow.forward(x, x_mask, g=g, reverse=reverse)
+        return x
+
+    def remove_weight_norm(self):
+        """Removes weight normalization from the coupling layers."""
+        for i in range(self.n_flows):
+            self.flows[i * 2].remove_weight_norm()
+
+    def __prepare_scriptable__(self):
+        """Prepares the module for scripting."""
+        for i in range(self.n_flows):
+            for hook in self.flows[i * 2]._forward_pre_hooks.values():
+                if (
+                    hook.__module__ == "torch.nn.utils.parametrizations.weight_norm"
+                    and hook.__class__.__name__ == "WeightNorm"
+                ):
+                    torch.nn.utils.remove_weight_norm(self.flows[i * 2])
+
+        return self
+
+
+class ResidualCouplingLayer(torch.nn.Module):
+    """Residual coupling layer for flow-based models.
+
+    Args:
+        channels (int): Number of channels.
+        hidden_channels (int): Number of hidden channels.
+        kernel_size (int): Size of the convolutional kernel.
+        dilation_rate (int): Dilation rate of the convolution.
+        n_layers (int): Number of convolutional layers.
+        p_dropout (float, optional): Dropout probability. Defaults to 0.
+        gin_channels (int, optional): Number of conditioning channels. Defaults to 0.
+        mean_only (bool, optional): Whether to use mean-only coupling. Defaults to False.
+    """
+
+    def __init__(
+        self,
+        channels,
+        hidden_channels,
+        kernel_size,
+        dilation_rate,
+        n_layers,
+        p_dropout=0,
+        gin_channels=0,
+        mean_only=False,
+    ):
+        assert channels % 2 == 0, "channels should be divisible by 2"
+        super().__init__()
+        self.channels = channels
+        self.hidden_channels = hidden_channels
+        self.kernel_size = kernel_size
+        self.dilation_rate = dilation_rate
+        self.n_layers = n_layers
+        self.half_channels = channels // 2
+        self.mean_only = mean_only
+
+        self.pre = torch.nn.Conv1d(self.half_channels, hidden_channels, 1)
+        self.enc = WaveNet(
+            hidden_channels,
+            kernel_size,
+            dilation_rate,
+            n_layers,
+            p_dropout=p_dropout,
+            gin_channels=gin_channels,
+        )
+        self.post = torch.nn.Conv1d(
+            hidden_channels, self.half_channels * (2 - mean_only), 1
+        )
+        self.post.weight.data.zero_()
+        self.post.bias.data.zero_()
+
+    def forward(self, x, x_mask, g=None, reverse=False):
+        """Forward pass.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, channels, time_steps).
+            x_mask (torch.Tensor): Mask tensor of shape (batch_size, 1, time_steps).
+            g (torch.Tensor, optional): Conditioning tensor of shape (batch_size, gin_channels, time_steps).
+                Defaults to None.
+            reverse (bool, optional): Whether to reverse the operation. Defaults to False.
+        """
+        x0, x1 = torch.split(x, [self.half_channels] * 2, 1)
+        h = self.pre(x0) * x_mask
+        h = self.enc(h, x_mask, g=g)
+        stats = self.post(h) * x_mask
+        if not self.mean_only:
+            m, logs = torch.split(stats, [self.half_channels] * 2, 1)
+        else:
+            m = stats
+            logs = torch.zeros_like(m)
+
+        if not reverse:
+            x1 = m + x1 * torch.exp(logs) * x_mask
+            x = torch.cat([x0, x1], 1)
+            logdet = torch.sum(logs, [1, 2])
+            return x, logdet
+        else:
+            x1 = (x1 - m) * torch.exp(-logs) * x_mask
+            x = torch.cat([x0, x1], 1)
+            return x
+
+    def remove_weight_norm(self):
+        """Remove weight normalization from the module."""
+        self.enc.remove_weight_norm()
+
+----------------------
+File Name: synthesizers.py
+----------------------
+
+import torch
+from typing import Optional
+
+from .nsf import GeneratorNSF
+from .generators import Generator
+from .commons import slice_segments, rand_slice_segments
+from .residuals import ResidualCouplingBlock
+from .encoders import TextEncoder, PosteriorEncoder
+
+
+class Synthesizer(torch.nn.Module):
+    """
+    Base Synthesizer model.
+
+    Args:
+        spec_channels (int): Number of channels in the spectrogram.
+        segment_size (int): Size of the audio segment.
+        inter_channels (int): Number of channels in the intermediate layers.
+        hidden_channels (int): Number of channels in the hidden layers.
+        filter_channels (int): Number of channels in the filter layers.
+        n_heads (int): Number of attention heads.
+        n_layers (int): Number of layers in the encoder.
+        kernel_size (int): Size of the convolution kernel.
+        p_dropout (float): Dropout probability.
+        resblock (str): Type of residual block.
+        resblock_kernel_sizes (list): Kernel sizes for the residual blocks.
+        resblock_dilation_sizes (list): Dilation sizes for the residual blocks.
+        upsample_rates (list): Upsampling rates for the decoder.
+        upsample_initial_channel (int): Number of channels in the initial upsampling layer.
+        upsample_kernel_sizes (list): Kernel sizes for the upsampling layers.
+        spk_embed_dim (int): Dimension of the speaker embedding.
+        gin_channels (int): Number of channels in the global conditioning vector.
+        sr (int): Sampling rate of the audio.
+        use_f0 (bool): Whether to use F0 information.
+        text_enc_hidden_dim (int): Hidden dimension for the text encoder.
+        kwargs: Additional keyword arguments.
+    """
+
+    def __init__(
+        self,
+        spec_channels,
+        segment_size,
+        inter_channels,
+        hidden_channels,
+        filter_channels,
+        n_heads,
+        n_layers,
+        kernel_size,
+        p_dropout,
+        resblock,
+        resblock_kernel_sizes,
+        resblock_dilation_sizes,
+        upsample_rates,
+        upsample_initial_channel,
+        upsample_kernel_sizes,
+        spk_embed_dim,
+        gin_channels,
+        sr,
+        use_f0,
+        text_enc_hidden_dim=768,
+        **kwargs
+    ):
+        super(Synthesizer, self).__init__()
+        self.spec_channels = spec_channels
+        self.inter_channels = inter_channels
+        self.hidden_channels = hidden_channels
+        self.filter_channels = filter_channels
+        self.n_heads = n_heads
+        self.n_layers = n_layers
+        self.kernel_size = kernel_size
+        self.p_dropout = float(p_dropout)
+        self.resblock = resblock
+        self.resblock_kernel_sizes = resblock_kernel_sizes
+        self.resblock_dilation_sizes = resblock_dilation_sizes
+        self.upsample_rates = upsample_rates
+        self.upsample_initial_channel = upsample_initial_channel
+        self.upsample_kernel_sizes = upsample_kernel_sizes
+        self.segment_size = segment_size
+        self.gin_channels = gin_channels
+        self.spk_embed_dim = spk_embed_dim
+        self.use_f0 = use_f0
+
+        self.enc_p = TextEncoder(
+            inter_channels,
+            hidden_channels,
+            filter_channels,
+            n_heads,
+            n_layers,
+            kernel_size,
+            float(p_dropout),
+            text_enc_hidden_dim,
+            f0=use_f0,
+        )
+
+        if use_f0:
+            self.dec = GeneratorNSF(
+                inter_channels,
+                resblock,
+                resblock_kernel_sizes,
+                resblock_dilation_sizes,
+                upsample_rates,
+                upsample_initial_channel,
+                upsample_kernel_sizes,
+                gin_channels=gin_channels,
+                sr=sr,
+                is_half=kwargs["is_half"],
+            )
+        else:
+            self.dec = Generator(
+                inter_channels,
+                resblock,
+                resblock_kernel_sizes,
+                resblock_dilation_sizes,
+                upsample_rates,
+                upsample_initial_channel,
+                upsample_kernel_sizes,
+                gin_channels=gin_channels,
+            )
+
+        self.enc_q = PosteriorEncoder(
+            spec_channels,
+            inter_channels,
+            hidden_channels,
+            5,
+            1,
+            16,
+            gin_channels=gin_channels,
+        )
+        self.flow = ResidualCouplingBlock(
+            inter_channels, hidden_channels, 5, 1, 3, gin_channels=gin_channels
+        )
+        self.emb_g = torch.nn.Embedding(self.spk_embed_dim, gin_channels)
+
+    def remove_weight_norm(self):
+        """Removes weight normalization from the model."""
+        self.dec.remove_weight_norm()
+        self.flow.remove_weight_norm()
+        self.enc_q.remove_weight_norm()
+
+    def __prepare_scriptable__(self):
+        for hook in self.dec._forward_pre_hooks.values():
+            if (
+                hook.__module__ == "torch.nn.utils.parametrizations.weight_norm"
+                and hook.__class__.__name__ == "WeightNorm"
+            ):
+                torch.nn.utils.remove_weight_norm(self.dec)
+        for hook in self.flow._forward_pre_hooks.values():
+            if (
+                hook.__module__ == "torch.nn.utils.parametrizations.weight_norm"
+                and hook.__class__.__name__ == "WeightNorm"
+            ):
+                torch.nn.utils.remove_weight_norm(self.flow)
+        if hasattr(self, "enc_q"):
+            for hook in self.enc_q._forward_pre_hooks.values():
+                if (
+                    hook.__module__ == "torch.nn.utils.parametrizations.weight_norm"
+                    and hook.__class__.__name__ == "WeightNorm"
+                ):
+                    torch.nn.utils.remove_weight_norm(self.enc_q)
+        return self
+
+    @torch.jit.ignore
+    def forward(
+        self,
+        phone: torch.Tensor,
+        phone_lengths: torch.Tensor,
+        pitch: Optional[torch.Tensor] = None,
+        pitchf: Optional[torch.Tensor] = None,
+        y: torch.Tensor = None,
+        y_lengths: torch.Tensor = None,
+        ds: Optional[torch.Tensor] = None,
+    ):
+        """
+        Forward pass of the model.
+
+        Args:
+            phone (torch.Tensor): Phoneme sequence.
+            phone_lengths (torch.Tensor): Lengths of the phoneme sequences.
+            pitch (torch.Tensor, optional): Pitch sequence.
+            pitchf (torch.Tensor, optional): Fine-grained pitch sequence.
+            y (torch.Tensor, optional): Target spectrogram.
+            y_lengths (torch.Tensor, optional): Lengths of the target spectrograms.
+            ds (torch.Tensor, optional): Speaker embedding. Defaults to None.
+        """
+        g = self.emb_g(ds).unsqueeze(-1)
+        m_p, logs_p, x_mask = self.enc_p(phone, pitch, phone_lengths)
+        if y is not None:
+            z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g)
+            z_p = self.flow(z, y_mask, g=g)
+            z_slice, ids_slice = rand_slice_segments(z, y_lengths, self.segment_size)
+            if self.use_f0:
+                pitchf = slice_segments(pitchf, ids_slice, self.segment_size, 2)
+                o = self.dec(z_slice, pitchf, g=g)
+            else:
+                o = self.dec(z_slice, g=g)
+            return o, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
+        else:
+            return None, None, x_mask, None, (None, None, m_p, logs_p, None, None)
+
+    @torch.jit.export
+    def infer(
+        self,
+        phone: torch.Tensor,
+        phone_lengths: torch.Tensor,
+        pitch: Optional[torch.Tensor] = None,
+        nsff0: Optional[torch.Tensor] = None,
+        sid: torch.Tensor = None,
+        rate: Optional[torch.Tensor] = None,
+    ):
+        """
+        Inference of the model.
+
+        Args:
+            phone (torch.Tensor): Phoneme sequence.
+            phone_lengths (torch.Tensor): Lengths of the phoneme sequences.
+            pitch (torch.Tensor, optional): Pitch sequence.
+            nsff0 (torch.Tensor, optional): Fine-grained pitch sequence.
+            sid (torch.Tensor): Speaker embedding.
+            rate (torch.Tensor, optional): Rate for time-stretching. Defaults to None.
+        """
+        g = self.emb_g(sid).unsqueeze(-1)
+        m_p, logs_p, x_mask = self.enc_p(phone, pitch, phone_lengths)
+        z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
+        if rate is not None:
+            assert isinstance(rate, torch.Tensor)
+            head = int(z_p.shape[2] * (1.0 - rate.item()))
+            z_p = z_p[:, :, head:]
+            x_mask = x_mask[:, :, head:]
+            if self.use_f0:
+                nsff0 = nsff0[:, head:]
+        if self.use_f0:
+            z = self.flow(z_p, x_mask, g=g, reverse=True)
+            o = self.dec(z * x_mask, nsff0, g=g)
+        else:
+            z = self.flow(z_p, x_mask, g=g, reverse=True)
+            o = self.dec(z * x_mask, g=g)
+        return o, x_mask, (z, z_p, m_p, logs_p)
+
+----------------------
+File Name: RMVPE.py
+----------------------
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
+from librosa.filters import mel
+from typing import List
+
+# Constants for readability
+N_MELS = 128
+N_CLASS = 360
+
+
+# Define a helper function for creating convolutional blocks
+class ConvBlockRes(nn.Module):
+    """
+    A convolutional block with residual connection.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        momentum (float): Momentum for batch normalization.
+    """
+
+    def __init__(self, in_channels, out_channels, momentum=0.01):
+        super(ConvBlockRes, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=(3, 3),
+                stride=(1, 1),
+                padding=(1, 1),
+                bias=False,
+            ),
+            nn.BatchNorm2d(out_channels, momentum=momentum),
+            nn.ReLU(),
+            nn.Conv2d(
+                in_channels=out_channels,
+                out_channels=out_channels,
+                kernel_size=(3, 3),
+                stride=(1, 1),
+                padding=(1, 1),
+                bias=False,
+            ),
+            nn.BatchNorm2d(out_channels, momentum=momentum),
+            nn.ReLU(),
+        )
+        if in_channels != out_channels:
+            self.shortcut = nn.Conv2d(in_channels, out_channels, (1, 1))
+            self.is_shortcut = True
+        else:
+            self.is_shortcut = False
+
+    def forward(self, x):
+        if self.is_shortcut:
+            return self.conv(x) + self.shortcut(x)
+        else:
+            return self.conv(x) + x
+
+
+# Define a class for residual encoder blocks
+class ResEncoderBlock(nn.Module):
+    """
+    A residual encoder block.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        kernel_size (tuple): Size of the average pooling kernel.
+        n_blocks (int): Number of convolutional blocks in the block.
+        momentum (float): Momentum for batch normalization.
+    """
+
+    def __init__(
+        self, in_channels, out_channels, kernel_size, n_blocks=1, momentum=0.01
+    ):
+        super(ResEncoderBlock, self).__init__()
+        self.n_blocks = n_blocks
+        self.conv = nn.ModuleList()
+        self.conv.append(ConvBlockRes(in_channels, out_channels, momentum))
+        for _ in range(n_blocks - 1):
+            self.conv.append(ConvBlockRes(out_channels, out_channels, momentum))
+        self.kernel_size = kernel_size
+        if self.kernel_size is not None:
+            self.pool = nn.AvgPool2d(kernel_size=kernel_size)
+
+    def forward(self, x):
+        for i in range(self.n_blocks):
+            x = self.conv[i](x)
+        if self.kernel_size is not None:
+            return x, self.pool(x)
+        else:
+            return x
+
+
+# Define a class for the encoder
+class Encoder(nn.Module):
+    """
+    The encoder part of the DeepUnet.
+
+    Args:
+        in_channels (int): Number of input channels.
+        in_size (int): Size of the input tensor.
+        n_encoders (int): Number of encoder blocks.
+        kernel_size (tuple): Size of the average pooling kernel.
+        n_blocks (int): Number of convolutional blocks in each encoder block.
+        out_channels (int): Number of output channels for the first encoder block.
+        momentum (float): Momentum for batch normalization.
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        in_size,
+        n_encoders,
+        kernel_size,
+        n_blocks,
+        out_channels=16,
+        momentum=0.01,
+    ):
+        super(Encoder, self).__init__()
+        self.n_encoders = n_encoders
+        self.bn = nn.BatchNorm2d(in_channels, momentum=momentum)
+        self.layers = nn.ModuleList()
+        self.latent_channels = []
+        for i in range(self.n_encoders):
+            self.layers.append(
+                ResEncoderBlock(
+                    in_channels, out_channels, kernel_size, n_blocks, momentum=momentum
+                )
+            )
+            self.latent_channels.append([out_channels, in_size])
+            in_channels = out_channels
+            out_channels *= 2
+            in_size //= 2
+        self.out_size = in_size
+        self.out_channel = out_channels
+
+    def forward(self, x: torch.Tensor):
+        concat_tensors: List[torch.Tensor] = []
+        x = self.bn(x)
+        for i in range(self.n_encoders):
+            t, x = self.layers[i](x)
+            concat_tensors.append(t)
+        return x, concat_tensors
+
+
+# Define a class for the intermediate layer
+class Intermediate(nn.Module):
+    """
+    The intermediate layer of the DeepUnet.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        n_inters (int): Number of convolutional blocks in the intermediate layer.
+        n_blocks (int): Number of convolutional blocks in each intermediate block.
+        momentum (float): Momentum for batch normalization.
+    """
+
+    def __init__(self, in_channels, out_channels, n_inters, n_blocks, momentum=0.01):
+        super(Intermediate, self).__init__()
+        self.n_inters = n_inters
+        self.layers = nn.ModuleList()
+        self.layers.append(
+            ResEncoderBlock(in_channels, out_channels, None, n_blocks, momentum)
+        )
+        for _ in range(self.n_inters - 1):
+            self.layers.append(
+                ResEncoderBlock(out_channels, out_channels, None, n_blocks, momentum)
+            )
+
+    def forward(self, x):
+        for i in range(self.n_inters):
+            x = self.layers[i](x)
+        return x
+
+
+# Define a class for residual decoder blocks
+class ResDecoderBlock(nn.Module):
+    """
+    A residual decoder block.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        stride (tuple): Stride for transposed convolution.
+        n_blocks (int): Number of convolutional blocks in the block.
+        momentum (float): Momentum for batch normalization.
+    """
+
+    def __init__(self, in_channels, out_channels, stride, n_blocks=1, momentum=0.01):
+        super(ResDecoderBlock, self).__init__()
+        out_padding = (0, 1) if stride == (1, 2) else (1, 1)
+        self.n_blocks = n_blocks
+        self.conv1 = nn.Sequential(
+            nn.ConvTranspose2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=(3, 3),
+                stride=stride,
+                padding=(1, 1),
+                output_padding=out_padding,
+                bias=False,
+            ),
+            nn.BatchNorm2d(out_channels, momentum=momentum),
+            nn.ReLU(),
+        )
+        self.conv2 = nn.ModuleList()
+        self.conv2.append(ConvBlockRes(out_channels * 2, out_channels, momentum))
+        for _ in range(n_blocks - 1):
+            self.conv2.append(ConvBlockRes(out_channels, out_channels, momentum))
+
+    def forward(self, x, concat_tensor):
+        x = self.conv1(x)
+        x = torch.cat((x, concat_tensor), dim=1)
+        for i in range(self.n_blocks):
+            x = self.conv2[i](x)
+        return x
+
+
+# Define a class for the decoder
+class Decoder(nn.Module):
+    """
+    The decoder part of the DeepUnet.
+
+    Args:
+        in_channels (int): Number of input channels.
+        n_decoders (int): Number of decoder blocks.
+        stride (tuple): Stride for transposed convolution.
+        n_blocks (int): Number of convolutional blocks in each decoder block.
+        momentum (float): Momentum for batch normalization.
+    """
+
+    def __init__(self, in_channels, n_decoders, stride, n_blocks, momentum=0.01):
+        super(Decoder, self).__init__()
+        self.layers = nn.ModuleList()
+        self.n_decoders = n_decoders
+        for _ in range(self.n_decoders):
+            out_channels = in_channels // 2
+            self.layers.append(
+                ResDecoderBlock(in_channels, out_channels, stride, n_blocks, momentum)
+            )
+            in_channels = out_channels
+
+    def forward(self, x, concat_tensors):
+        for i in range(self.n_decoders):
+            x = self.layers[i](x, concat_tensors[-1 - i])
+        return x
+
+
+# Define a class for the DeepUnet architecture
+class DeepUnet(nn.Module):
+    """
+    The DeepUnet architecture.
+
+    Args:
+        kernel_size (tuple): Size of the average pooling kernel.
+        n_blocks (int): Number of convolutional blocks in each encoder/decoder block.
+        en_de_layers (int): Number of encoder/decoder layers.
+        inter_layers (int): Number of convolutional blocks in the intermediate layer.
+        in_channels (int): Number of input channels.
+        en_out_channels (int): Number of output channels for the first encoder block.
+    """
+
+    def __init__(
+        self,
+        kernel_size,
+        n_blocks,
+        en_de_layers=5,
+        inter_layers=4,
+        in_channels=1,
+        en_out_channels=16,
+    ):
+        super(DeepUnet, self).__init__()
+        self.encoder = Encoder(
+            in_channels, 128, en_de_layers, kernel_size, n_blocks, en_out_channels
+        )
+        self.intermediate = Intermediate(
+            self.encoder.out_channel // 2,
+            self.encoder.out_channel,
+            inter_layers,
+            n_blocks,
+        )
+        self.decoder = Decoder(
+            self.encoder.out_channel, en_de_layers, kernel_size, n_blocks
+        )
+
+    def forward(self, x):
+        x, concat_tensors = self.encoder(x)
+        x = self.intermediate(x)
+        x = self.decoder(x, concat_tensors)
+        return x
+
+
+# Define a class for the end-to-end model
+class E2E(nn.Module):
+    """
+    The end-to-end model.
+
+    Args:
+        n_blocks (int): Number of convolutional blocks in each encoder/decoder block.
+        n_gru (int): Number of GRU layers.
+        kernel_size (tuple): Size of the average pooling kernel.
+        en_de_layers (int): Number of encoder/decoder layers.
+        inter_layers (int): Number of convolutional blocks in the intermediate layer.
+        in_channels (int): Number of input channels.
+        en_out_channels (int): Number of output channels for the first encoder block.
+    """
+
+    def __init__(
+        self,
+        n_blocks,
+        n_gru,
+        kernel_size,
+        en_de_layers=5,
+        inter_layers=4,
+        in_channels=1,
+        en_out_channels=16,
+    ):
+        super(E2E, self).__init__()
+        self.unet = DeepUnet(
+            kernel_size,
+            n_blocks,
+            en_de_layers,
+            inter_layers,
+            in_channels,
+            en_out_channels,
+        )
+        self.cnn = nn.Conv2d(en_out_channels, 3, (3, 3), padding=(1, 1))
+        if n_gru:
+            self.fc = nn.Sequential(
+                BiGRU(3 * 128, 256, n_gru),
+                nn.Linear(512, N_CLASS),
+                nn.Dropout(0.25),
+                nn.Sigmoid(),
+            )
+        else:
+            self.fc = nn.Sequential(
+                nn.Linear(3 * N_MELS, N_CLASS), nn.Dropout(0.25), nn.Sigmoid()
+            )
+
+    def forward(self, mel):
+        mel = mel.transpose(-1, -2).unsqueeze(1)
+        x = self.cnn(self.unet(mel)).transpose(1, 2).flatten(-2)
+        x = self.fc(x)
+        return x
+
+
+# Define a class for the MelSpectrogram extractor
+class MelSpectrogram(torch.nn.Module):
+    """
+    Extracts Mel-spectrogram features from audio.
+
+    Args:
+        is_half (bool): Whether to use half-precision floating-point numbers.
+        n_mel_channels (int): Number of Mel-frequency bands.
+        sample_rate (int): Sampling rate of the audio.
+        win_length (int): Length of the window function in samples.
+        hop_length (int): Hop size between frames in samples.
+        n_fft (int, optional): Length of the FFT window. Defaults to None, which uses win_length.
+        mel_fmin (int, optional): Minimum frequency for the Mel filter bank. Defaults to 0.
+        mel_fmax (int, optional): Maximum frequency for the Mel filter bank. Defaults to None.
+        clamp (float, optional): Minimum value for clamping the Mel-spectrogram. Defaults to 1e-5.
+    """
+
+    def __init__(
+        self,
+        is_half,
+        n_mel_channels,
+        sample_rate,
+        win_length,
+        hop_length,
+        n_fft=None,
+        mel_fmin=0,
+        mel_fmax=None,
+        clamp=1e-5,
+    ):
+        super().__init__()
+        n_fft = win_length if n_fft is None else n_fft
+        self.hann_window = {}
+        mel_basis = mel(
+            sr=sample_rate,
+            n_fft=n_fft,
+            n_mels=n_mel_channels,
+            fmin=mel_fmin,
+            fmax=mel_fmax,
+            htk=True,
+        )
+        mel_basis = torch.from_numpy(mel_basis).float()
+        self.register_buffer("mel_basis", mel_basis)
+        self.n_fft = win_length if n_fft is None else n_fft
+        self.hop_length = hop_length
+        self.win_length = win_length
+        self.sample_rate = sample_rate
+        self.n_mel_channels = n_mel_channels
+        self.clamp = clamp
+        self.is_half = is_half
+
+    def forward(self, audio, keyshift=0, speed=1, center=True):
+        factor = 2 ** (keyshift / 12)
+        n_fft_new = int(np.round(self.n_fft * factor))
+        win_length_new = int(np.round(self.win_length * factor))
+        hop_length_new = int(np.round(self.hop_length * speed))
+        keyshift_key = str(keyshift) + "_" + str(audio.device)
+        if keyshift_key not in self.hann_window:
+            self.hann_window[keyshift_key] = torch.hann_window(win_length_new).to(
+                audio.device
+            )
+
+        # Zluda, fall-back to CPU for FFTs since HIP SDK has no cuFFT alternative
+        source_device = audio.device
+        if audio.device.type == "cuda" and torch.cuda.get_device_name().endswith(
+            "[ZLUDA]"
+        ):
+            audio = audio.to("cpu")
+            self.hann_window[keyshift_key] = self.hann_window[keyshift_key].to("cpu")
+
+        fft = torch.stft(
+            audio,
+            n_fft=n_fft_new,
+            hop_length=hop_length_new,
+            win_length=win_length_new,
+            window=self.hann_window[keyshift_key],
+            center=center,
+            return_complex=True,
+        ).to(source_device)
+
+        magnitude = torch.sqrt(fft.real.pow(2) + fft.imag.pow(2))
+        if keyshift != 0:
+            size = self.n_fft // 2 + 1
+            resize = magnitude.size(1)
+            if resize < size:
+                magnitude = F.pad(magnitude, (0, 0, 0, size - resize))
+            magnitude = magnitude[:, :size, :] * self.win_length / win_length_new
+        mel_output = torch.matmul(self.mel_basis, magnitude)
+        if self.is_half:
+            mel_output = mel_output.half()
+        log_mel_spec = torch.log(torch.clamp(mel_output, min=self.clamp))
+        return log_mel_spec
+
+
+# Define a class for the RMVPE0 predictor
+class RMVPE0Predictor:
+    """
+    A predictor for fundamental frequency (F0) based on the RMVPE0 model.
+
+    Args:
+        model_path (str): Path to the RMVPE0 model file.
+        is_half (bool): Whether to use half-precision floating-point numbers.
+        device (str, optional): Device to use for computation. Defaults to None, which uses CUDA if available.
+    """
+
+    def __init__(self, model_path, is_half, device=None):
+        self.resample_kernel = {}
+        model = E2E(4, 1, (2, 2))
+        ckpt = torch.load(model_path, map_location="cpu")
+        model.load_state_dict(ckpt)
+        model.eval()
+        if is_half:
+            model = model.half()
+        self.model = model
+        self.resample_kernel = {}
+        self.is_half = is_half
+        self.device = device
+        self.mel_extractor = MelSpectrogram(
+            is_half, N_MELS, 16000, 1024, 160, None, 30, 8000
+        ).to(device)
+        self.model = self.model.to(device)
+        cents_mapping = 20 * np.arange(N_CLASS) + 1997.3794084376191
+        self.cents_mapping = np.pad(cents_mapping, (4, 4))
+
+    def mel2hidden(self, mel):
+        """
+        Converts Mel-spectrogram features to hidden representation.
+
+        Args:
+            mel (torch.Tensor): Mel-spectrogram features.
+        """
+        with torch.no_grad():
+            n_frames = mel.shape[-1]
+            mel = F.pad(
+                mel, (0, 32 * ((n_frames - 1) // 32 + 1) - n_frames), mode="reflect"
+            )
+            hidden = self.model(mel)
+            return hidden[:, :n_frames]
+
+    def decode(self, hidden, thred=0.03):
+        """
+        Decodes hidden representation to F0.
+
+        Args:
+            hidden (np.ndarray): Hidden representation.
+            thred (float, optional): Threshold for salience. Defaults to 0.03.
+        """
+        cents_pred = self.to_local_average_cents(hidden, thred=thred)
+        f0 = 10 * (2 ** (cents_pred / 1200))
+        f0[f0 == 10] = 0
+        return f0
+
+    def infer_from_audio(self, audio, thred=0.03):
+        """
+        Infers F0 from audio.
+
+        Args:
+            audio (np.ndarray): Audio signal.
+            thred (float, optional): Threshold for salience. Defaults to 0.03.
+        """
+        audio = torch.from_numpy(audio).float().to(self.device).unsqueeze(0)
+        mel = self.mel_extractor(audio, center=True)
+        hidden = self.mel2hidden(mel)
+        hidden = hidden.squeeze(0).cpu().numpy()
+        if self.is_half == True:
+            hidden = hidden.astype("float32")
+        f0 = self.decode(hidden, thred=thred)
+        return f0
+
+    def to_local_average_cents(self, salience, thred=0.05):
+        """
+        Converts salience to local average cents.
+
+        Args:
+            salience (np.ndarray): Salience values.
+            thred (float, optional): Threshold for salience. Defaults to 0.05.
+        """
+        center = np.argmax(salience, axis=1)
+        salience = np.pad(salience, ((0, 0), (4, 4)))
+        center += 4
+        todo_salience = []
+        todo_cents_mapping = []
+        starts = center - 4
+        ends = center + 5
+        for idx in range(salience.shape[0]):
+            todo_salience.append(salience[:, starts[idx] : ends[idx]][idx])
+            todo_cents_mapping.append(self.cents_mapping[starts[idx] : ends[idx]])
+        todo_salience = np.array(todo_salience)
+        todo_cents_mapping = np.array(todo_cents_mapping)
+        product_sum = np.sum(todo_salience * todo_cents_mapping, 1)
+        weight_sum = np.sum(todo_salience, 1)
+        devided = product_sum / weight_sum
+        maxx = np.max(salience, axis=1)
+        devided[maxx <= thred] = 0
+        return devided
+
+
+# Define a class for BiGRU (bidirectional GRU)
+class BiGRU(nn.Module):
+    """
+    A bidirectional GRU layer.
+
+    Args:
+        input_features (int): Number of input features.
+        hidden_features (int): Number of hidden features.
+        num_layers (int): Number of GRU layers.
+    """
+
+    def __init__(self, input_features, hidden_features, num_layers):
+        super(BiGRU, self).__init__()
+        self.gru = nn.GRU(
+            input_features,
+            hidden_features,
+            num_layers=num_layers,
+            batch_first=True,
+            bidirectional=True,
+        )
+
+    def forward(self, x):
+        return self.gru(x)[0]
+
+----------------------
+File Name: pipeline.py
+----------------------
+
+import os
+import sys
+import torch
+import torch.nn.functional as F
+import faiss
+import librosa
+import numpy as np
+from scipy import signal
+import yaml
+import time
+
+now_dir = os.getcwd()
+sys.path.append(now_dir)
+
+from .models.f0_extractor.RMVPE import RMVPE0Predictor
+
+import logging
+
+logging.getLogger("faiss").setLevel(
+    logging.WARNING
+)  # If we need to keep faiss logging muted
+
+logging.basicConfig(level=logging.INFO)
+
+# Constants for high-pass filter
+FILTER_ORDER = 5
+CUTOFF_FREQUENCY = 48  # Hz
+SAMPLE_RATE = 16000  # Hz
+highpass_b, highpass_a = signal.butter(
+    N=FILTER_ORDER, Wn=CUTOFF_FREQUENCY, btype="high", fs=SAMPLE_RATE
+)
+
+# Read configuration
+with open("config.yaml") as f:
+    cfg = yaml.load(f, Loader=yaml.FullLoader)
+
+
+class Pipeline:
+    """
+    The main pipeline class for performing voice conversion, including preprocessing, F0 estimation,
+    voice conversion using a model, and post-processing.
+    """
+
+    def __init__(self, target_sample_rate, config):
+        """
+        Initializes the Pipeline class with target sampling rate and configuration parameters.
+
+        Args:
+            target_sample_rate: The target sampling rate for the output audio.
+            config: A configuration object containing various parameters for the pipeline.
+        """
+        self.padding_seconds = config.x_pad
+        self.query_seconds = config.x_query
+        self.center_seconds = config.x_center
+        self.max_seconds = config.x_max
+        self.use_half_precision = config.is_half
+        self.sample_rate = SAMPLE_RATE
+        self.window_size = 160
+        self.input_padding_samples = self.sample_rate * self.padding_seconds
+        self.output_padding_samples = target_sample_rate * self.padding_seconds
+        self.double_input_padding_samples = self.input_padding_samples * 2
+        self.query_samples = self.sample_rate * self.query_seconds
+        self.center_samples = self.sample_rate * self.center_seconds
+        self.max_samples = self.sample_rate * self.max_seconds
+        self.time_step_ms = self.window_size / self.sample_rate * 1000
+        self.min_f0_hz = 50
+        self.max_f0_hz = 1100
+        self.min_f0_mel = 1127 * np.log(1 + self.min_f0_hz / 700)
+        self.max_f0_mel = 1127 * np.log(1 + self.max_f0_hz / 700)
+        self.device = config.device
+        self.reference_frequencies = [
+            65.41,
+            82.41,
+            110.00,
+            146.83,
+            196.00,
+            246.94,
+            329.63,
+            440.00,
+            587.33,
+            783.99,
+            1046.50,
+        ]
+
+    def get_f0(
+        self,
+        audio_signal,
+        pitch_shift,
+        hop_length,
+        input_f0=None,
+    ):
+        """
+        Estimates the fundamental frequency (F0) of a given audio signal using various methods.
+
+        Args:
+            audio_signal: The input audio signal as a NumPy array.
+            pitch_shift: The pitch shift to apply.
+            hop_length: Hop length for F0 estimation methods.
+            input_f0: Optional input F0 contour to use instead of estimating.
+        """
+        # This is where the Pitch Extraction model is loaded.
+        # Can modify the path to make it simple,
+        # model_path = os.path.join("rvc", "models", "predictors", "rmvpe.pt")
+        start_time = time.time()  # Start timing
+        rmvpe_model_path = cfg["rmvpe_path"]
+        rmvpe_predictor = RMVPE0Predictor(
+            rmvpe_model_path,
+            is_half=self.use_half_precision,
+            device=self.device,
+        )
+        f0 = rmvpe_predictor.infer_from_audio(audio_signal, thred=0.03)
+
+        # Apply pitch shift
+        f0 *= pow(2, pitch_shift / 12)
+        time_factor = self.sample_rate // self.window_size
+        if input_f0 is not None:
+            delta_t = np.round(
+                (input_f0[:, 0].max() - input_f0[:, 0].min()) * time_factor + 1
+            ).astype("int16")
+            interpolated_f0 = np.interp(
+                list(range(delta_t)), input_f0[:, 0] * 100, input_f0[:, 1]
+            )
+            shape = f0[
+                self.padding_seconds * time_factor : self.padding_seconds * time_factor
+                + len(interpolated_f0)
+            ].shape[0]
+            f0[
+                self.padding_seconds * time_factor : self.padding_seconds * time_factor
+                + len(interpolated_f0)
+            ] = interpolated_f0[:shape]
+
+        f0_backup = f0.copy()
+        f0_mel = 1127 * np.log(1 + f0 / 700)
+        f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - self.min_f0_mel) * 254 / (
+            self.max_f0_mel - self.min_f0_mel
+        ) + 1
+        f0_mel[f0_mel <= 1] = 1
+        f0_mel[f0_mel > 255] = 255
+        f0_coarse = np.rint(f0_mel).astype(np.int32)
+        end_time = time.time()  # End timing
+        logging.info(f"get_f0 execution time: {end_time - start_time:.4f} seconds")
+
+        return f0_coarse, f0_backup
+
+    def voice_conversion(
+        self,
+        feature_extractor_model,
+        generative_model,
+        speaker_id,
+        audio_segment,
+        quantized_pitch,
+        fine_pitch,
+        faiss_index,
+        speaker_embeddings,
+        index_blend_rate,
+        model_version,
+        pitch_protection,
+    ):
+        """
+        Performs voice conversion on a given audio segment using pitch guidance.
+
+        Args:
+            feature_extractor_model: The feature extractor model.
+            generative_model: The generative model for synthesizing speech.
+            speaker_id: Speaker ID for the target voice.
+            audio_segment: The input audio segment.
+            quantized_pitch: Quantized F0 contour for pitch guidance.
+            fine_pitch: Original F0 contour for pitch guidance.
+            faiss_index: FAISS index for speaker embedding retrieval.
+            speaker_embeddings: Speaker embeddings stored in a NumPy array.
+            index_blend_rate: Blending rate for speaker embedding retrieval.
+            model_version: Model version ("v1" or "v2").
+            pitch_protection: Protection level for preserving the original pitch.
+        """
+        # Convert audio segment to torch tensor
+        start_time = time.time()  # Start timing
+        features = torch.from_numpy(audio_segment)
+        features = features.half() if self.use_half_precision else features.float()
+
+        if features.dim() == 2:
+            features = features.mean(-1)
+
+        assert features.dim() == 1, features.dim()
+        features = features.view(1, -1)
+
+        with torch.no_grad():
+            features = feature_extractor_model(features.to(self.device))[
+                "last_hidden_state"
+            ]
+            if model_version == "v1":
+                features = feature_extractor_model.final_proj(features[0]).unsqueeze(0)
+
+        if (
+            pitch_protection < 0.5
+            and quantized_pitch is not None
+            and fine_pitch is not None
+        ):
+            features_copy = features.clone()
+
+        if (
+            faiss_index is not None
+            and speaker_embeddings is not None
+            and index_blend_rate != 0
+        ):
+            npy_features = features[0].cpu().numpy()
+            if self.use_half_precision:
+                npy_features = npy_features.astype("float32")
+
+            scores, indices = faiss_index.search(npy_features, k=8)
+            weights = np.square(1 / scores)
+            weights /= weights.sum(axis=1, keepdims=True)
+            npy_features = np.sum(
+                speaker_embeddings[indices] * np.expand_dims(weights, axis=2), axis=1
+            )
+
+            if self.use_half_precision:
+                npy_features = npy_features.astype("float16")
+            features = (
+                torch.from_numpy(npy_features).unsqueeze(0).to(self.device)
+                * index_blend_rate
+                + (1 - index_blend_rate) * features
+            )
+
+        features = F.interpolate(features.permute(0, 2, 1), scale_factor=2).permute(
+            0, 2, 1
+        )
+
+        if (
+            pitch_protection < 0.5
+            and quantized_pitch is not None
+            and fine_pitch is not None
+        ):
+            features_copy = F.interpolate(
+                features_copy.permute(0, 2, 1), scale_factor=2
+            ).permute(0, 2, 1)
+
+        p_length = audio_segment.shape[0] // self.window_size
+
+        if features.shape[1] < p_length:
+            p_length = features.shape[1]
+            quantized_pitch = quantized_pitch[:, :p_length]
+            fine_pitch = fine_pitch[:, :p_length]
+
+        if (
+            pitch_protection < 0.5
+            and quantized_pitch is not None
+            and fine_pitch is not None
+        ):
+            pitch_mask = fine_pitch.clone()
+            pitch_mask[fine_pitch > 0] = 1
+            pitch_mask[fine_pitch < 1] = pitch_protection
+            pitch_mask = pitch_mask.unsqueeze(-1)
+            features = features * pitch_mask + features_copy * (1 - pitch_mask)
+            features = features.to(features_copy.dtype)
+
+        p_length_tensor = torch.tensor([p_length], device=self.device).long()
+        end_time = time.time()  # End timing
+        logging.info(f"FAISS execution time: {end_time - start_time:.4f} seconds")
+
+        start_time = time.time()  # Start timing
+        with torch.no_grad():
+            converted_audio = (
+                (
+                    generative_model.infer(
+                        features,
+                        p_length_tensor,
+                        quantized_pitch,
+                        fine_pitch,
+                        speaker_id,
+                    )[0][0, 0]
+                )
+                .data.cpu()
+                .float()
+                .numpy()
+            )
+        end_time = time.time()  # End timing
+        logging.info(f"Generative Model execution time: {end_time - start_time:.4f} seconds")
+
+
+
+        del features, p_length_tensor
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        return converted_audio
+
+    def process_pipeline(
+        self,
+        feature_extractor_model,
+        generative_model,
+        speaker_id,
+        audio_signal,
+        pitch_shift,
+        faiss_index_path,
+        index_blend_rate,
+        filter_radius,
+        target_sample_rate,
+        resample_rate,
+        model_version,
+        pitch_protection,
+        hop_length,
+    ):
+        """
+        The main pipeline function for performing voice conversion with pitch guidance.
+
+        Args:
+            feature_extractor_model: The feature extractor model.
+            generative_model: The generative model for synthesizing speech.
+            speaker_id: Speaker ID for the target voice.
+            audio_signal: The input audio signal.
+            pitch_shift: Key to adjust the pitch of the F0 contour.
+            faiss_index_path: Path to the FAISS index file for speaker embedding retrieval.
+            index_blend_rate: Blending rate for speaker embedding retrieval.
+            filter_radius: Radius for median filtering the F0 contour.
+            target_sample_rate: Target sampling rate for the output audio.
+            resample_rate: Resampling rate for the output audio.
+            model_version: Model version.
+            pitch_protection: Protection level for preserving the original pitch.
+            hop_length: Hop length for F0 estimation methods.
+        """
+        total_start_time = time.time()  # Start timing the entire pipeline
+        if (
+            faiss_index_path != ""
+            and os.path.exists(faiss_index_path)
+            and index_blend_rate != 0
+        ):
+            try:
+                faiss_index = faiss.read_index(faiss_index_path)
+                speaker_embeddings = faiss_index.reconstruct_n(0, faiss_index.ntotal)
+            except Exception as error:
+                print(f"An error occurred reading the FAISS index: {error}")
+                faiss_index = speaker_embeddings = None
+        else:
+            faiss_index = speaker_embeddings = None
+
+        audio_signal = signal.filtfilt(highpass_b, highpass_a, audio_signal)
+        audio_padded = np.pad(
+            audio_signal, (self.window_size // 2, self.window_size // 2), mode="reflect"
+        )
+        time_segments = []
+
+        if audio_padded.shape[0] > self.max_samples:
+            summed_audio = np.zeros_like(audio_signal)
+            for i in range(self.window_size):
+                summed_audio += audio_padded[i : i - self.window_size]
+
+            for t in range(
+                self.center_samples, audio_signal.shape[0], self.center_samples
+            ):
+                min_index = np.where(
+                    np.abs(
+                        summed_audio[t - self.query_samples : t + self.query_samples]
+                    )
+                    == np.abs(
+                        summed_audio[t - self.query_samples : t + self.query_samples]
+                    ).min()
+                )[0][0]
+                time_segments.append(t - self.query_samples + min_index)
+
+        segment_start = 0
+        audio_output = []
+        segment_end = None
+        audio_padded = np.pad(
+            audio_signal,
+            (self.input_padding_samples, self.input_padding_samples),
+            mode="reflect",
+        )
+        p_length = audio_padded.shape[0] // self.window_size
+        speaker_id_tensor = (
+            torch.tensor(speaker_id, device=self.device).unsqueeze(0).long()
+        )
+
+        quantized_pitch, fine_pitch = self.get_f0(
+            audio_padded,
+            pitch_shift,
+            hop_length,
+        )
+        quantized_pitch = quantized_pitch[:p_length]
+        fine_pitch = fine_pitch[:p_length]
+
+        if self.device == "mps":
+            fine_pitch = fine_pitch.astype(np.float32)
+
+        quantized_pitch_tensor = (
+            torch.tensor(quantized_pitch, device=self.device).unsqueeze(0).long()
+        )
+        fine_pitch_tensor = (
+            torch.tensor(fine_pitch, device=self.device).unsqueeze(0).float()
+        )
+
+        for segment_end in time_segments:
+            segment_end = segment_end // self.window_size * self.window_size
+            audio_output.append(
+                self.voice_conversion(
+                    feature_extractor_model,
+                    generative_model,
+                    speaker_id_tensor,
+                    audio_padded[
+                        segment_start : segment_end
+                        + self.double_input_padding_samples
+                        + self.window_size
+                    ],
+                    quantized_pitch_tensor[
+                        :,
+                        segment_start
+                        // self.window_size : (
+                            segment_end + self.double_input_padding_samples
+                        )
+                        // self.window_size,
+                    ],
+                    fine_pitch_tensor[
+                        :,
+                        segment_start
+                        // self.window_size : (
+                            segment_end + self.double_input_padding_samples
+                        )
+                        // self.window_size,
+                    ],
+                    faiss_index,
+                    speaker_embeddings,
+                    index_blend_rate,
+                    model_version,
+                    pitch_protection,
+                )[self.output_padding_samples : -self.output_padding_samples]
+            )
+            segment_start = segment_end
+
+        audio_output.append(
+            self.voice_conversion(
+                feature_extractor_model,
+                generative_model,
+                speaker_id_tensor,
+                audio_padded[segment_end:],
+                (
+                    quantized_pitch_tensor[:, segment_end // self.window_size :]
+                    if segment_end is not None
+                    else quantized_pitch_tensor
+                ),
+                (
+                    fine_pitch_tensor[:, segment_end // self.window_size :]
+                    if segment_end is not None
+                    else fine_pitch_tensor
+                ),
+                faiss_index,
+                speaker_embeddings,
+                index_blend_rate,
+                model_version,
+                pitch_protection,
+            )[self.output_padding_samples : -self.output_padding_samples]
+        )
+
+        audio_output = np.concatenate(audio_output)
+
+        if resample_rate >= self.sample_rate and target_sample_rate != resample_rate:
+            audio_output = librosa.resample(
+                audio_output, orig_sr=target_sample_rate, target_sr=resample_rate
+            )
+
+        audio_max = np.abs(audio_output).max() / 0.99
+        max_int16 = 32768
+        if audio_max > 1:
+            max_int16 /= audio_max
+        audio_output = (audio_output * max_int16).astype(np.int16)
+
+        del quantized_pitch_tensor, fine_pitch_tensor, speaker_id_tensor
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        total_end_time = time.time()  # End timing the entire pipeline
+        logging.info(f"Total pipeline execution time: {total_end_time - total_start_time:.4f} seconds")
+
+        return audio_output
+
+----------------------
+File Name: config.py
+----------------------
+
+import torch
+import json
+import os
+
+"""
+This config is from Applio, its not great but works for now.
+"""
+
+version_config_paths = [
+    os.path.join("v1", "32000.json"),
+    os.path.join("v1", "40000.json"),
+    os.path.join("v1", "48000.json"),
+    os.path.join("v2", "48000.json"),
+    os.path.join("v2", "40000.json"),
+    os.path.join("v2", "32000.json"),
+]
+
+
+def singleton(cls):
+    instances = {}
+
+    def get_instance(*args, **kwargs):
+        if cls not in instances:
+            instances[cls] = cls(*args, **kwargs)
+        return instances[cls]
+
+    return get_instance
+
+
+@singleton
+class Config:
+    def __init__(self):
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        self.is_half = self.device != "cpu"
+        self.gpu_name = (
+            torch.cuda.get_device_name(int(self.device.split(":")[-1]))
+            if self.device.startswith("cuda")
+            else None
+        )
+        self.json_config = self.load_config_json()
+        self.gpu_mem = None
+        self.x_pad, self.x_query, self.x_center, self.x_max = self.device_config()
+
+    def load_config_json(self) -> dict:
+        configs = {}
+        for config_file in version_config_paths:
+            # Need to modify this.
+            # choir_backend
+            config_path = os.path.join("choir_backend", "system_config", config_file)
+            with open(config_path, "r") as f:
+                configs[config_file] = json.load(f)
+        return configs
+
+    def has_mps(self) -> bool:
+        # Check if Metal Performance Shaders are available - for macOS 12.3+.
+        return torch.backends.mps.is_available()
+
+    def has_xpu(self) -> bool:
+        # Check if XPU is available.
+        return hasattr(torch, "xpu") and torch.xpu.is_available()
+
+    def set_precision(self, precision):
+        if precision not in ["fp32", "fp16"]:
+            raise ValueError("Invalid precision type. Must be 'fp32' or 'fp16'.")
+
+        fp16_run_value = precision == "fp16"
+        preprocess_target_version = "3.7" if precision == "fp16" else "3.0"
+        preprocess_path = os.path.join(
+            os.path.dirname(__file__),
+            os.pardir,
+            "rvc",
+            "train",
+            "preprocess",
+            "preprocess.py",
+        )
+
+        for config_path in version_config_paths:
+            full_config_path = "/choir_backend/system_config"
+            try:
+                with open(full_config_path, "r") as f:
+                    config = json.load(f)
+                config["train"]["fp16_run"] = fp16_run_value
+                with open(full_config_path, "w") as f:
+                    json.dump(config, f, indent=4)
+            except FileNotFoundError:
+                print(f"File not found: {full_config_path}")
+
+        if os.path.exists(preprocess_path):
+            with open(preprocess_path, "r") as f:
+                preprocess_content = f.read()
+            preprocess_content = preprocess_content.replace(
+                "3.0" if precision == "fp16" else "3.7", preprocess_target_version
+            )
+            with open(preprocess_path, "w") as f:
+                f.write(preprocess_content)
+
+        return f"Overwritten preprocess and config.json to use {precision}."
+
+    def get_precision(self):
+        if not version_config_paths:
+            raise FileNotFoundError("No configuration paths provided.")
+
+        full_config_path = os.path.join("rvc", "configs", version_config_paths[0])
+        try:
+            with open(full_config_path, "r") as f:
+                config = json.load(f)
+            fp16_run_value = config["train"].get("fp16_run", False)
+            precision = "fp16" if fp16_run_value else "fp32"
+            return precision
+        except FileNotFoundError:
+            print(f"File not found: {full_config_path}")
+            return None
+
+    def device_config(self) -> tuple:
+        if self.device.startswith("cuda"):
+            self.set_cuda_config()
+        elif self.has_mps():
+            self.device = "mps"
+            self.is_half = False
+            self.set_precision("fp32")
+        else:
+            self.device = "cpu"
+            self.is_half = False
+            self.set_precision("fp32")
+
+        # Configuration for 6GB GPU memory
+        x_pad, x_query, x_center, x_max = (
+            (3, 10, 60, 65) if self.is_half else (1, 6, 38, 41)
+        )
+        if self.gpu_mem is not None and self.gpu_mem <= 4:
+            # Configuration for 5GB GPU memory
+            x_pad, x_query, x_center, x_max = (1, 5, 30, 32)
+
+        return x_pad, x_query, x_center, x_max
+
+    def set_cuda_config(self):
+        i_device = int(self.device.split(":")[-1])
+        self.gpu_name = torch.cuda.get_device_name(i_device)
+        # Zluda
+        if self.gpu_name.endswith("[ZLUDA]"):
+            print("Zluda compatibility enabled, experimental feature.")
+            torch.backends.cudnn.enabled = False
+            torch.backends.cuda.enable_flash_sdp(False)
+            torch.backends.cuda.enable_math_sdp(True)
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+        low_end_gpus = ["16", "P40", "P10", "1060", "1070", "1080"]
+        if (
+            any(gpu in self.gpu_name for gpu in low_end_gpus)
+            and "V100" not in self.gpu_name.upper()
+        ):
+            self.is_half = False
+            self.set_precision("fp32")
+
+        self.gpu_mem = torch.cuda.get_device_properties(i_device).total_memory // (
+            1024**3
+        )
+
+
+def max_vram_gpu(gpu):
+    if torch.cuda.is_available():
+        gpu_properties = torch.cuda.get_device_properties(gpu)
+        total_memory_gb = round(gpu_properties.total_memory / 1024 / 1024 / 1024)
+        return total_memory_gb
+    else:
+        return "0"
+
+
+def get_gpu_info():
+    ngpu = torch.cuda.device_count()
+    gpu_infos = []
+    if torch.cuda.is_available() or ngpu != 0:
+        for i in range(ngpu):
+            gpu_name = torch.cuda.get_device_name(i)
+            mem = int(
+                torch.cuda.get_device_properties(i).total_memory / 1024 / 1024 / 1024
+                + 0.4
+            )
+            gpu_infos.append(f"{i}: {gpu_name} ({mem} GB)")
+    if len(gpu_infos) > 0:
+        gpu_info = "\n".join(gpu_infos)
+    else:
+        gpu_info = "Unfortunately, there is no compatible GPU available to support your training."
+    return gpu_info
+
+
+def get_number_of_gpus():
+    if torch.cuda.is_available():
+        num_gpus = torch.cuda.device_count()
+        return "-".join(map(str, range(num_gpus)))
+    else:
+        return "-"
+
+----------------------
+File Name: split_audio.py
+----------------------
+
+from pydub.silence import detect_nonsilent
+from pydub import AudioSegment
+import numpy as np
+import re
+import os
+
+from .utils import format_title
+
+
+def process_audio(file_path):
+    try:
+        # load audio file
+        song = AudioSegment.from_file(file_path)
+
+        # set silence threshold and duration
+        silence_thresh = -70  # dB
+        min_silence_len = 750  # ms, adjust as needed
+
+        # detect nonsilent parts
+        nonsilent_parts = detect_nonsilent(
+            song, min_silence_len=min_silence_len, silence_thresh=silence_thresh
+        )
+
+        # Create a new directory to store chunks
+        file_dir = os.path.dirname(file_path)
+        file_name = os.path.basename(file_path).split(".")[0]
+        file_name = format_title(file_name)
+        new_dir_path = os.path.join(file_dir, file_name)
+        os.makedirs(new_dir_path, exist_ok=True)
+
+        # Check if timestamps file exists, if so delete it
+        timestamps_file = os.path.join(file_dir, f"{file_name}_timestamps.txt")
+        if os.path.isfile(timestamps_file):
+            os.remove(timestamps_file)
+
+        # export chunks and save start times
+        segment_count = 0
+        for i, (start_i, end_i) in enumerate(nonsilent_parts):
+            chunk = song[start_i:end_i]
+            chunk_file_path = os.path.join(new_dir_path, f"chunk{i}.wav")
+            chunk.export(chunk_file_path, format="wav")
+
+            print(f"Segment {i} created!")
+            segment_count += 1
+
+            # write start times to file
+            with open(timestamps_file, "a", encoding="utf-8") as f:
+                f.write(f"{chunk_file_path} starts at {start_i} ms\n")
+
+        print(f"Total segments created: {segment_count}")
+        print(f"Split all chunks for {file_path} successfully!")
+
+        return "Finish", new_dir_path
+
+    except Exception as error:
+        print(f"An error occurred splitting the audio: {error}")
+        return "Error", None
+
+
+def merge_audio(timestamps_file):
+    try:
+        # Extract prefix from the timestamps filename
+        prefix = os.path.basename(timestamps_file).replace("_timestamps.txt", "")
+        timestamps_dir = os.path.dirname(timestamps_file)
+
+        # Open the timestamps file
+        with open(timestamps_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        # Initialize empty list to hold audio segments
+        audio_segments = []
+        last_end_time = 0
+
+        print(f"Processing file: {timestamps_file}")
+
+        for line in lines:
+            # Extract filename and start time from line
+            match = re.search(r"(chunk\d+.wav) starts at (\d+) ms", line)
+            if match:
+                filename, start_time = match.groups()
+                start_time = int(start_time)
+
+                # Construct the complete path to the chunk file
+                chunk_file = os.path.join(timestamps_dir, prefix, filename)
+
+                # Add silence from last_end_time to start_time
+                silence_duration = max(start_time - last_end_time, 0)
+                silence = AudioSegment.silent(duration=silence_duration)
+                audio_segments.append(silence)
+
+                # Load audio file and append to list
+                audio = AudioSegment.from_wav(chunk_file)
+                audio_segments.append(audio)
+
+                # Update last_end_time
+                last_end_time = start_time + len(audio)
+
+                print(f"Processed chunk: {chunk_file}")
+
+        # Concatenate all audio_segments and export
+        merged_audio = sum(audio_segments)
+        merged_audio_np = np.array(merged_audio.get_array_of_samples())
+        # print(f"Exported merged file: {merged_filename}\n")
+        return merged_audio.frame_rate, merged_audio_np
+
+    except Exception as error:
+        print(f"An error occurred splitting the audio: {error}")
+
+----------------------
+File Name: utils.py
+----------------------
+
+import os
+import librosa
+import soundfile as sf
+import re
+import unicodedata
+from torch import nn
+
+import logging
+from transformers import HubertModel
+import warnings
+
+# Remove this to see warnings about transformers models
+warnings.filterwarnings("ignore")
+
+logging.getLogger("faiss.loader").setLevel(logging.ERROR)
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("torch").setLevel(logging.ERROR)
+
+
+class HubertModelWithFinalProj(HubertModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.final_proj = nn.Linear(config.hidden_size, config.classifier_proj_size)
+
+
+def load_audio_infer(file, sample_rate):
+    """
+    Loads an audio file, processes it, and resamples it to the specified sample rate.
+
+    This function performs the following steps to prepare an audio file for inference:
+    1. Strips unnecessary whitespace and quotation marks from the file path.
+    2. Checks if the file exists and raises a `FileNotFoundError` if it does not.
+    3. Reads the audio file using `soundfile.read()`.
+    4. Converts the audio to mono if it has more than one channel.
+    5. Resamples the audio to the specified sample rate if the original sample rate differs.
+    6. Returns the audio data as a flattened array.
+
+    Args:
+        file (str): The path to the audio file to be loaded.
+        sample_rate (int): The desired sample rate to which the audio will be resampled.
+
+    Returns:
+        numpy.ndarray: A flattened array containing the processed audio data.
+
+    Raises:
+        FileNotFoundError: If the specified file does not exist.
+        RuntimeError: If an error occurs during the audio processing steps.
+    """
+    try:
+        file = file.strip(" ").strip('"').strip("\n").strip('"').strip(" ")
+        if not os.path.isfile(file):
+            raise FileNotFoundError(f"File not found: {file}")
+        audio, sr = sf.read(file)
+        if len(audio.shape) > 1:
+            audio = librosa.to_mono(audio.T)
+        if sr != sample_rate:
+            audio = librosa.resample(audio, orig_sr=sr, target_sr=sample_rate)
+    except Exception as error:
+        raise RuntimeError(f"An error occurred loading the audio: {error}")
+    return audio.flatten()
+
+
+def format_title(title):
+    formatted_title = (
+        unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("utf-8")
+    )
+    formatted_title = re.sub(r"[\u2500-\u257F]+", "", formatted_title)
+    formatted_title = re.sub(r"[^\w\s.-]", "", formatted_title)
+    formatted_title = re.sub(r"\s+", "_", formatted_title)
+    return formatted_title
+
+
+def load_embedding(hubert_dir_path):
+    return HubertModelWithFinalProj.from_pretrained(hubert_dir_path)
+
+----------------------
+File Name: voice_converter.py
+----------------------
+
+import os
+import time
+import torch
+import logging
+import traceback
+import numpy as np
+import soundfile as sf
+
+# Project-specific imports
+from .pipeline import Pipeline
+from .utils.utils import load_audio_infer, load_embedding
+from .utils.split_audio import process_audio, merge_audio
+from .models.choir_generator.synthesizers import Synthesizer
+from .system_config.config import Config
+
+# Configure logging levels to reduce unnecessary output
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("faiss").setLevel(logging.WARNING)
+logging.getLogger("faiss.loader").setLevel(logging.WARNING)
+
+
+class VoiceConverter:
+    """
+    A class for performing voice conversion using the Retrieval-Based Voice Conversion (RVC) method.
+    """
+
+    def __init__(self):
+        """
+        Initializes the VoiceConverter with default configuration, and sets up models and parameters.
+        """
+        self.config = Config()  # Load RVC configuration
+        self.hubert_model = None  # HuBERT model for embedding extraction
+        self.last_embedder_model = None  # Last used embedder model to avoid reloading
+        self.target_sampling_rate = None  # Target sampling rate for output audio
+        self.generator_network = None  # Generator network for voice conversion
+        self.voice_conversion_pipeline = None  # Voice conversion pipeline instance
+        self.model_checkpoint = None  # Checkpoint for loading model weights
+        self.model_version = None  # Model version
+        self.num_speakers = None  # Number of speakers in the model
+        self.use_f0 = None  # Whether the model uses F0 information
+
+    def load_hubert_model(self, embedder_model: str):
+        """
+        Loads the HuBERT model for speaker embedding extraction.
+
+        Args:
+            embedder_model (str): Path to the pre-trained HuBERT model directory.
+        """
+        self.hubert_model = load_embedding(embedder_model)
+        self.hubert_model.to(self.config.device)
+        self.hubert_model = (
+            self.hubert_model.half()
+            if self.config.is_half
+            else self.hubert_model.float()
+        )
+        self.hubert_model.eval()
+
+    def convert_audio(
+        self,
+        audio_input_path: str,
+        audio_output_path: str,
+        model_path: str,
+        index_path: str,
+        embedder_model: str,
+        pitch: int,
+        index_rate: float,
+        volume_envelope: int,
+        protect: float,
+        hop_length: int,  # Reintroduced hop_length here
+        split_audio: bool,
+        filter_radius: int,
+        resample_sample_rate: int = 0,
+        speaker_id: int = 0,
+    ):
+        """
+        Performs voice conversion on the input audio.
+
+        Args:
+            audio_input_path (str): Path to the input audio file.
+            audio_output_path (str): Path to the output audio file.
+            model_path (str): Path to the voice conversion model.
+            index_path (str): Path to the index file.
+            embedder_model (str): Path to the embedder model.
+            pitch (int): Pitch shift for voice conversion.
+            index_rate (float): Rate for index matching.
+            volume_envelope (int): Volume envelope value.
+            protect (float): Protection rate for certain audio segments.
+            hop_length (int): Hop length for audio processing.  # It's now back
+            split_audio (bool): Whether to split the audio for processing.
+            filter_radius (int): Radius for filtering.
+            resample_sample_rate (int): Resample sampling rate.
+            speaker_id (int): Speaker ID.
+        """
+        self.load_voice_conversion_pipeline(model_path, speaker_id)
+
+        try:
+            start_time = time.time()
+            print(f"Converting audio '{audio_input_path}'...")
+            audio_data = load_audio_infer(audio_input_path, 16000)
+            max_amplitude = np.abs(audio_data).max() / 0.95
+
+            if max_amplitude > 1:
+                audio_data /= max_amplitude
+
+            if not self.hubert_model or embedder_model != self.last_embedder_model:
+                self.load_hubert_model(embedder_model)
+                self.last_embedder_model = embedder_model
+
+            file_index = index_path.strip().replace("trained", "added")
+
+            if resample_sample_rate >= 16000:
+                self.target_sampling_rate = resample_sample_rate
+
+            if split_audio:
+                split_result, split_dir_path = process_audio(audio_input_path)
+                if split_result == "Error":
+                    return "Error with Split Audio"
+
+                audio_segments = [
+                    os.path.join(root, name)
+                    for root, _, files in os.walk(split_dir_path, topdown=False)
+                    for name in files
+                    if name.endswith(".wav") and root == split_dir_path
+                ]
+
+                for segment_path in audio_segments:
+                    self.convert_audio(
+                        audio_input_path=segment_path,
+                        audio_output_path=segment_path,
+                        model_path=model_path,
+                        index_path=index_path,
+                        embedder_model=embedder_model,
+                        pitch=pitch,
+                        index_rate=index_rate,
+                        volume_envelope=volume_envelope,
+                        protect=protect,
+                        hop_length=hop_length,  # Passing it here
+                        split_audio=False,  # No further splitting
+                        filter_radius=filter_radius,
+                        resample_sample_rate=resample_sample_rate,
+                        speaker_id=speaker_id,
+                    )
+
+                # Merge segments after processing
+                print("Finished processing segmented audio, now merging audio...")
+                merge_timestamps_file = os.path.join(
+                    os.path.dirname(split_dir_path),
+                    f"{os.path.basename(audio_input_path).split('.')[0]}_timestamps.txt",
+                )
+                self.target_sampling_rate, merged_audio = merge_audio(
+                    merge_timestamps_file
+                )
+                os.remove(merge_timestamps_file)
+                sf.write(
+                    audio_output_path,
+                    merged_audio,
+                    self.target_sampling_rate,
+                    format="WAV",
+                )
+            else:
+                converted_audio = self.voice_conversion_pipeline.process_pipeline(
+                    feature_extractor_model=self.hubert_model,
+                    generative_model=self.generator_network,
+                    speaker_id=speaker_id,
+                    audio_signal=audio_data,
+                    pitch_shift=pitch,
+                    faiss_index_path=file_index,
+                    index_blend_rate=index_rate,
+                    filter_radius=filter_radius,
+                    target_sample_rate=self.target_sampling_rate,
+                    resample_rate=resample_sample_rate,
+                    model_version=self.model_version,
+                    pitch_protection=protect,
+                    hop_length=hop_length,
+                )
+                sf.write(
+                    audio_output_path,
+                    converted_audio,
+                    self.target_sampling_rate,
+                    format="WAV",
+                )
+
+            elapsed_time = time.time() - start_time
+            print(
+                f"Conversion completed at '{audio_output_path}' in {elapsed_time:.2f} seconds."
+            )
+        except Exception as error:
+            print(f"An error occurred during audio conversion: {error}")
+            print(traceback.format_exc())
+
+    def load_voice_conversion_pipeline(self, model_weights_path: str, speaker_id: int):
+        """
+        Loads the voice conversion model and sets up the pipeline.
+
+        Args:
+            model_weights_path (str): Path to the model weights.
+            speaker_id (int): Speaker ID.
+        """
+        if speaker_id == "":
+            self.cleanup_resources()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        self.load_model_weights(model_weights_path)
+
+        if self.model_checkpoint is not None:
+            self.setup_network_parameters()
+            self.initialize_voice_conversion_pipeline()
+
+    def cleanup_resources(self):
+        """
+        Cleans up the model and releases resources.
+        """
+        if self.hubert_model is not None:
+            del (
+                self.generator_network,
+                self.num_speakers,
+                self.voice_conversion_pipeline,
+                self.hubert_model,
+                self.target_sampling_rate,
+            )
+            self.hubert_model = self.generator_network = self.num_speakers = (
+                self.voice_conversion_pipeline
+            ) = self.target_sampling_rate = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        del self.generator_network, self.model_checkpoint
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        self.model_checkpoint = None
+
+    def load_model_weights(self, model_weights_path: str):
+        """
+        Loads the model weights from the specified path.
+
+        Args:
+            model_weights_path (str): Path to the model weights.
+        """
+        self.model_checkpoint = (
+            torch.load(model_weights_path, map_location="cpu")
+            if os.path.isfile(model_weights_path)
+            else None
+        )
+
+    def setup_network_parameters(self):
+        """
+        Sets up the network configuration based on the loaded checkpoint.
+        """
+        if self.model_checkpoint is not None:
+            self.target_sampling_rate = self.model_checkpoint["config"][-1]
+            self.model_checkpoint["config"][-3] = self.model_checkpoint["weight"][
+                "emb_g.weight"
+            ].shape[0]
+            self.use_f0 = self.model_checkpoint.get("f0", 1)
+
+            self.model_version = self.model_checkpoint.get("version", "v1")
+            self.text_enc_hidden_dim = 768 if self.model_version == "v2" else 256
+            self.generator_network = Synthesizer(
+                *self.model_checkpoint["config"],
+                use_f0=self.use_f0,
+                text_enc_hidden_dim=self.text_enc_hidden_dim,
+                is_half=self.config.is_half,
+            )
+            del self.generator_network.enc_q
+            self.generator_network.load_state_dict(
+                self.model_checkpoint["weight"], strict=False
+            )
+            self.generator_network.eval().to(self.config.device)
+            self.generator_network = (
+                self.generator_network.half()
+                if self.config.is_half
+                else self.generator_network.float()
+            )
+
+    def initialize_voice_conversion_pipeline(self):
+        """
+        Sets up the voice conversion pipeline instance based on the target sampling rate and configuration.
+        """
+        if self.model_checkpoint is not None:
+            self.voice_conversion_pipeline = Pipeline(
+                self.target_sampling_rate, self.config
+            )
+            self.num_speakers = self.model_checkpoint["config"][-3]
+
+----------------------
+File Name: config.yaml
+----------------------
+
+evc:
+  model_path: /app/model_weights/echelon-vc/gospel_model_u67_v2.pth
+  index_path: /app/model_weights/echelon-vc/u67search.index
+rmvpe_path: /app/model_weights/rmvpe/rmvpe.pt
+hubert_dir_path: /app/model_weights/hubert/contentvec/
+output: /home/cameronolson/documents/projects/echelon-beta/choir-converter/generated_audio/output.wav
+
+----------------------
+File Name: inference_script.py
+----------------------
+
+from choir_backend.inference_manager import InferenceManager
+from choir_backend.inference_config import InferConfig
+import argparse
+
+import yaml
+
+with open("config.yaml") as f:
+    cfg = yaml.load(f, Loader=yaml.FullLoader)
+
+
+# Accept Audio Path, Pitch Shift
+parser = argparse.ArgumentParser()
+parser.add_argument("audio_file", type=str)
+parser.add_argument("pitch", type=int)
+
+args = parser.parse_args()
+
+config = InferConfig(
+    pitch=args.pitch,
+    input_path=args.audio_file,
+    output_path=cfg["output"],
+    model_path=cfg["evc"]["model_path"],
+    index_path=cfg["evc"]["index_path"],
+    embedder_model=cfg["hubert_dir_path"],
+)
+
+manager = InferenceManager(config)
+
+manager.run_inference()
+
+----------------------
+File Name: requirements.txt
+----------------------
+
+# ML dependencies
+torch
+numpy==1.26.4 # version needed in faiss-cpu
+tqdm
+wget # might remove
+faiss-cpu
+transformers
+
+# Web dependencies
+fastapi
+uvicorn
+requests
+python-multipart
+
+# Audio dependencies
+soundfile
+librosa
+pydub
+
+# Config
+PyYAML
+
+google-auth 
+google-auth-oauthlib 
+google-auth-httplib2 
+google-api-python-client
+google-cloud-storage
+

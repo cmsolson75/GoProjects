@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+    <head>
+
+    </head>
+    <body>
+        <h1>Website: Cameron</h1>
+        <p class="message" id="message"></p>
+        <table>
+            <thead>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Age</th>
+            </thead>
+
+            <tbody id="data-output">
+
+            </tbody>
+        </table>
+
+        <input type="text" id="userID" placeholder="input user ID to find">
+        <button onclick="fetchUserID()">Fetch User</button>
+        <p id="userName"></p>
+
+        <h2>Add User!!</h2>
+        <form class="add">
+            <input name="name"id="name" type="text" placeholder="Name">
+            <input name="age" id="age" type="number" placeholder="Age">
+            <button type="submit">Submit</button>
+        </form>
+
+        <h2>Modify User</h2>
+        <form class="update">
+            <input name="id", id="updateID" type="number" placeholder="Input ID to modify">
+            <input name="name", id="name" type="text", placeholder="new name">
+            <input type="text" name="age" type="number" placeholder="new age">
+            <button type="submit">Submit</button>
+        </form>
+
+        <h2>Remove User</h2>
+        <input type="text" id="deleteID" placeholder="input user ID to delete">
+        <button onclick="deleteUserID()">Delete User</button>
+
+        <script src="index.js"></script>
+
+        <script>
+            const formUpdate = document.querySelector('.update');
+            formUpdate.addEventListener('submit', event => {
+                event.preventDefault()
+                updateUserByID()
+            })
+
+        </script>
+
+    </body>
+
+</html>

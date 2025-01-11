@@ -13,3 +13,4 @@ I just want to do a few simple projects to get a handle on the Syntax.
 - [User Manager](./user-manager/)
 - [Compound Interest Calculator](./compound_interest_calculator/)
 - [Countdown Timer](./countdown_timer/)
+- [Fruit Stand](./fruit_stand/)

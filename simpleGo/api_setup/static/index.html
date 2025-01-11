@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8"> 
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>User Management</title>
+        <style>
+            table {
+                border-collapse: collapse;
+                width: 100%;
+            }
+            th, td {
+                border: 1px solid #ddd;
+                padding: 8px;
+            }
+            th {
+                background-color: #f4f4f4;
+            }
+            .form-section {
+                margin-bottom: 20px;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>User Management</h1>
+        <!-- Fetch from server -->
+        <p class="message" id="message"></p>
+
+        <!-- Table to display users -->
+        <section>
+            <h2>User List</h2>
+            <table>
+                <tr>
+                    <th>ID</th>
+                    <th>Name</th>
+                    <th>Age</th>
+                </tr>
+                <tbody id="data-output">
+                    <!-- Fetch from server -->
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Fetch User By ID -->
+        <section class="form-section">
+            <h2>Fetch User By ID</h2>
+            <input type="text" id="userID" placeholder="Enter User ID">
+            <button onclick="fetchUserByID()">Fetch User</button>
+            <!-- Fetch user name from server -->
+            <p id="userName"></p>
+        </section>
+
+        <!-- Add User -->
+         <section class="form-selection">
+            <h2>Add New User</h2>
+            <form class="add">
+                <input type="text" name="name" placeholder="Name" required>
+                <input name="age" id="age" type="number" placeholder="Age" required>
+                <button type="submit">Add User</button>
+            </form>
+         </section>
+
+        <!-- Update User -->
+        <section class="form-section">
+            <h2>Update User</h2>
+            <form class="update">
+                <input type="number" name="id", placeholder="User ID" required>
+                <input type="text" name="name", placeholder="New Name">
+                <input type="number" name="age" placeholder="New Age">
+                <button type="submit">Update User</button>
+            </form>
+        </section>
+
+        <!-- Delete User -->
+         <section class="form-section">
+            <h2>Delete User</h2>
+            <input type="number" id="deleteID" placeholder="Enter User ID to Delete">
+            <button onclick="deleteUser()">Delete User</button>
+         </section>
+
+
+         <script src="index.js"></script>
+
+    </body>
+</html>
